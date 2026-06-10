@@ -35,6 +35,7 @@ path — just the NVMe KV command set over an SPDK vfio-user controller backed b
 
 | Submodule | Source | Branch | Role in the demo |
 |-----------|--------|--------|------------------|
+| [`ceph`](ceph) | [`ceph/ceph`](https://github.com/ceph/ceph/tree/tentacle) | `tentacle` | **The storage cluster.** Vendored so you can `vstart` a throwaway RADOS cluster for e2e, and so SPDK's `rados` kvdev backend links the matching `librados`. Latest stable release branch. |
 | [`spdk`](spdk) | [`mmgaggle/spdk`](https://github.com/mmgaggle/spdk/tree/rados-nkv) | `rados-nkv` | **The substrate.** NVMe-KV command set, the `kvdev` device layer with `mem` and `rados` (librados) backends, the NVMf KV controller (`ctrlr_kvdev`, CSI=KV namespaces, read-only & Exec gates), and the in-process **KV host shim** that the host-side consumers link against. |
 | [`rocm-xio`](rocm-xio) | [`mmgaggle/rocm-xio`](https://github.com/mmgaggle/rocm-xio/tree/nvme-kv) | `nvme-kv` | **GPU-initiated path.** `nvme-ep --kv-op store/retrieve` — GPU `__device__` code builds the KV SQE, rings the doorbell, polls the CQ, and the value lands in host RAM or VRAM (`--memory-mode 8`). |
 | [`qemu`](qemu) | [`sbates130272/qemu`](https://github.com/sbates130272/qemu) | `dev/stephen/pci-mmio-bridge-submit` | **GPU↔NVMe bridge.** The `pci-mmio-bridge` device polls a guest shadow ring and forwards the GPU's doorbell MMIO to the SPDK NVMe BAR, so the passed-through GPU can drive a vfio-user NVMe controller. |
@@ -71,7 +72,14 @@ git submodule update --init spdk rocm-xio qemu
 
 # Flow B (host consumers): spdk + nixl + rados-nkv-weights
 git submodule update --init spdk nixl rados-nkv-weights
+
+# Real Ceph backend (either flow): add ceph for a vstart cluster
+git submodule update --init ceph
 ```
+
+> **Heads up:** `ceph` is a large repository with its own submodules; expect a
+> sizable checkout. Skip it and use SPDK's in-memory `kvdev_mem` backend for a
+> dev loop that needs no cluster.
 
 > **Note:** `rados-nkv-weights` is hosted on the internal `github.ibm.com`
 > remote; populating it requires access to that host. The other four submodules

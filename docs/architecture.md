@@ -8,27 +8,27 @@ in-process SPDK shim — becomes a client, with no filesystem, mount, or
 object-storage credentials in the data path.
 
 ```
-       Flow A (GPU-initiated)                  Flow B (host-side consumers)
-  ┌───────────────────────────────┐      ┌───────────────────────────────────┐
-  │ rocm-xio nvme-ep --kv-op       │      │ NIXL RADOS_NKV     rados-nkv-weights│
-  │  (GPU __device__ KV SQE)       │      │  WRITE/READ/query   publisher/loader│
-  │            │                   │      │        │                  │        │
-  │  qemu pci-mmio-bridge          │      │        └── kv_host_shim.{c,h} ──────┤
-  │  (doorbell MMIO → NVMe BAR)    │      │            (in-process SPDK)        │
-  └────────────┼──────────────────┘      └────────────────┼────────────────────┘
-               │ vfio-user                                 │ vfio-user (loopback)
-               ▼                                           ▼
+       Flow A (GPU-initiated)                Flow B (host-side consumers)
+  ┌───────────────────────────────┐    ┌──────────────────────────────────────┐
+  │ rocm-xio nvme-ep --kv-op      │    │ NIXL RADOS_NKV     rados-nkv-weights │
+  │  (GPU __device__ KV SQE)      │    │  WRITE/READ/query   publisher/loader │
+  │            │                  │    │        │                  │          │
+  │  qemu pci-mmio-bridge         │    │        └── kv_host_shim.{c,h} ───────┤
+  │  (doorbell MMIO → NVMe BAR)   │    │            (in-process SPDK)         │
+  └────────────┼──────────────────┘    └────────────────┼─────────────────────┘
+               │ vfio-user                              │ vfio-user (loopback)
+               ▼                                        ▼
         ┌──────────────────────────────────────────────────────────────┐
-        │  SPDK nvmf_tgt                                                 │
-        │   • lib/nvme/nvme_kv.c, include/spdk/nvme_kv.h  (KV cmd set)   │
-        │   • lib/nvmf/ctrlr_kvdev.c   (NVMf KV controller, CSI=KV)      │
-        │       – key decode · read-only gate · KV-Exec allowlist       │
-        │   • lib/kvdev/kvdev.c        (device abstraction)             │
+        │  SPDK nvmf_tgt                                               │
+        │   • lib/nvme/nvme_kv.c, include/spdk/nvme_kv.h  (KV cmd set) │
+        │   • lib/nvmf/ctrlr_kvdev.c   (NVMf KV controller, CSI=KV)    │
+        │       – key decode · read-only gate · KV-Exec allowlist      │
+        │   • lib/kvdev/kvdev.c        (device abstraction)            │
         │   • module/kvdev/mem         (in-memory backend)             │
-        │   • module/kvdev/rados       (librados backend)  ────────────┐│
-        └───────────────────────────────────────────────────────────┼─┘
-                                                                      │ librados
-                                                                      ▼
+        │   • module/kvdev/rados       (librados backend)  ──────┐     │
+        └────────────────────────────────────────────────────────┼─────┘
+                                                                 │ librados
+                                                                 ▼
                        Ceph / RADOS:  pool = subsystem,  namespace = tenant,
                                       one object per KV pair
 ```

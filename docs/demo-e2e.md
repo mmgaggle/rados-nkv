@@ -2,18 +2,33 @@
 
 This is the full bring-up that ties every submodule together. It assumes all
 components are built (see [`build.md`](build.md)) and you have a Ceph cluster
-(or SPDK `vstart`-style RADOS) reachable via `ceph.conf` + keyring.
+(ie. `vstart`-style RADOS) reachable via `ceph.conf` + keyring.
 
 The single shared anchor across both flows is the **SPDK NVMe-KV-on-RADOS
 target**. Stand it up once; then drive it from the GPU (Flow A) and/or from host
 consumers (Flow B).
 
-## Step 0 — One Ceph pool + namespace
+## Step 0 — A throwaway Ceph cluster + pool
+
+Bring up a `vstart` cluster from the `ceph` submodule (built per
+[`build.md`](build.md) §0), then create the pool the KV namespace lands in:
 
 ```bash
-ceph osd pool create kvpool
+cd ceph/build
+MON=1 OSD=3 MGR=1 ../src/vstart.sh -n -d --without-dashboard
+export CEPH_CONF=$PWD/ceph.conf            # config + keyring vstart just wrote
+
+bin/ceph osd pool create kvpool
 # values land as objects in pool=kvpool, namespace=kvns
 ```
+
+`vstart.sh` writes a `ceph.conf` and admin keyring into `ceph/build/` — that's
+the config/keyring the SPDK `kvdev_rados_register_cluster` call in Step 1 points
+at. Tear the cluster down afterward with `../src/stop.sh`.
+
+> Skipping Ceph? Replace the `kvdev_rados_*` RPCs in Step 1 with
+> `kvdev_mem_create KvMem0` and drop this step — the in-memory backend needs no
+> cluster, and Steps 2–4 are otherwise unchanged.
 
 ## Step 1 — SPDK NVMe-KV target (the shared substrate)
 
@@ -23,7 +38,9 @@ Start `nvmf_tgt`, then:
 cd spdk
 scripts/rpc.py nvmf_create_transport -t VFIOUSER -q 1024 -m 16
 scripts/rpc.py kvdev_rados_register_cluster ceph0 \
-    --user admin --config-file ceph.conf --key-file keyring
+    --user admin \
+    --config-file "$CEPH_CONF" \
+    --key-file "$(dirname "$CEPH_CONF")/keyring"   # vstart's admin keyring
 scripts/rpc.py kvdev_rados_create KvRados0 ceph0 kvpool --namespace kvns
 scripts/rpc.py nvmf_create_subsystem nqn.2026-06.io.ceph-gpu:kv -s SPDKKVR01 -a
 scripts/rpc.py nvmf_subsystem_add_kv_ns nqn.2026-06.io.ceph-gpu:kv KvRados0   # CSI=KV

@@ -1,12 +1,18 @@
 # Building the stack
 
-Everything links against a built **SPDK** tree, so SPDK is built first. The
-other components are independent of each other.
+Everything links against a built **SPDK** tree, so SPDK is built first. SPDK's
+`rados` kvdev backend links **`librados`** from the `ceph` submodule, so build
+(or install) Ceph before SPDK if you want the real backend. The leaf components
+are independent of each other.
 
 ```
-                 ┌─────────────┐
-                 │  spdk       │  (build first — provides libspdk_nvme,
-                 └──────┬──────┘   kvdev modules, and kv_host_shim.{c,h})
+   ┌─────────┐
+   │  ceph   │  (optional — vstart cluster + librados for SPDK's rados backend)
+   └────┬────┘
+        ▼ librados
+   ┌─────────────┐
+   │  spdk       │  (build next — provides libspdk_nvme, kvdev modules,
+   └──────┬──────┘   and kv_host_shim.{c,h})
         ┌───────────────┼───────────────┬──────────────────┐
         ▼               ▼               ▼                  ▼
    ┌─────────┐    ┌──────────┐   ┌───────────────┐   ┌──────────┐
@@ -26,6 +32,28 @@ The per-component instructions below are summaries; the authoritative build
 docs live in each submodule (`spdk/README.md`, `rocm-xio/INSTALL.md`,
 `nixl/README.md`, `rados-nkv-weights/README.md`, QEMU's `docs/`).
 
+## 0. Ceph — the cluster (optional, for the `rados` backend)
+
+Skip this and use SPDK's in-memory `kvdev_mem` backend for a dev loop that needs
+no cluster. For real Ceph, build Ceph once and stand up a throwaway cluster with
+`vstart`:
+
+```bash
+cd ceph
+git submodule update --init        # Ceph's own submodules
+./install-deps.sh
+./do_cmake.sh -DWITH_RBD=ON
+cd build && ninja -j"$(nproc)" vstart    # builds the daemons + librados/librbd
+```
+
+This produces `lib/librados.so*` and headers that SPDK's `--with-rbd` configure
+links against. Bringing the cluster *up* is a runtime step — see
+[`demo-e2e.md`](demo-e2e.md) Step 0 (`MON=1 OSD=3 ../src/vstart.sh -n -d`).
+
+> Already have Ceph installed system-wide (packages, or another cluster reachable
+> via `ceph.conf` + keyring)? You can skip building the `ceph` submodule
+> entirely — SPDK just needs `librados` to link and a config/keyring at runtime.
+
 ## 1. SPDK — the substrate
 
 ```bash
@@ -34,6 +62,9 @@ git submodule update --init        # SPDK's own submodules (dpdk, isa-l, ...)
 ./configure --with-rbd             # librbd/librados for the rados kvdev backend
 make -j"$(nproc)"
 ```
+
+`--with-rbd` needs `librados`/`librbd` discoverable — from the `ceph` submodule
+build above, system packages, or a Ceph dev install.
 
 This yields `build/lib/libspdk_nvme.a` and friends, the `kvdev_mem` / `kvdev_rados`
 modules, and `test/nvmf/kv_shim/kv_host_shim.{c,h}` — the inputs every other

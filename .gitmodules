@@ -18,3 +18,7 @@
 	path = rados-nkv-weights
 	url = git@github.ibm.com:ceph/rados-nkv-weights.git
 	branch = main
+[submodule "ceph"]
+	path = ceph
+	url = https://github.com/ceph/ceph.git
+	branch = tentacle

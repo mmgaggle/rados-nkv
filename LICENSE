@@ -1,4 +1,4 @@
-Copyright 2026 Kyle Bader / IBM Corporation
+Copyright 2026 IBM Corporation, all rights reserved.
 
 The integration content in this repository — the documentation under docs/,
 the diagrams authored here (docs/diagrams/overview.mmd), and any scripts under
@@ -10,6 +10,7 @@ copy of the License at:
 Each submodule referenced by this repository is a separate work distributed
 under its own upstream license, which governs that submodule's contents:
 
+    ceph              LGPL-2.1       (github.com/ceph/ceph @ tentacle)
     spdk              BSD-3-Clause   (github.com/mmgaggle/spdk @ rados-nkv)
     rocm-xio          MIT            (github.com/mmgaggle/rocm-xio @ nvme-kv)
     nixl              Apache-2.0     (github.com/mmgaggle/nixl @ rados-nkv)
