@@ -1,0 +1,116 @@
+# End-to-end demo walkthrough
+
+This is the full bring-up that ties every submodule together. It assumes all
+components are built (see [`build.md`](build.md)) and you have a Ceph cluster
+(or SPDK `vstart`-style RADOS) reachable via `ceph.conf` + keyring.
+
+The single shared anchor across both flows is the **SPDK NVMe-KV-on-RADOS
+target**. Stand it up once; then drive it from the GPU (Flow A) and/or from host
+consumers (Flow B).
+
+## Step 0 — One Ceph pool + namespace
+
+```bash
+ceph osd pool create kvpool
+# values land as objects in pool=kvpool, namespace=kvns
+```
+
+## Step 1 — SPDK NVMe-KV target (the shared substrate)
+
+Start `nvmf_tgt`, then:
+
+```bash
+cd spdk
+scripts/rpc.py nvmf_create_transport -t VFIOUSER -q 1024 -m 16
+scripts/rpc.py kvdev_rados_register_cluster ceph0 \
+    --user admin --config-file ceph.conf --key-file keyring
+scripts/rpc.py kvdev_rados_create KvRados0 ceph0 kvpool --namespace kvns
+scripts/rpc.py nvmf_create_subsystem nqn.2026-06.io.ceph-gpu:kv -s SPDKKVR01 -a
+scripts/rpc.py nvmf_subsystem_add_kv_ns nqn.2026-06.io.ceph-gpu:kv KvRados0   # CSI=KV
+scripts/rpc.py nvmf_subsystem_add_listener nqn.2026-06.io.ceph-gpu:kv \
+    -t VFIOUSER -a /var/run/muser/domain/kv -s 0
+```
+
+`vfu_addr` for the host consumers is the listener directory, e.g.
+`/var/run/muser/domain/kv/0`.
+
+> For a no-Ceph dev run, swap steps 0–1's `kvdev_rados_*` for
+> `kvdev_mem_create` — everything downstream is unchanged.
+
+## Step 2 — Flow A: GPU-initiated Store + Retrieve
+
+Launch the GPU-passthrough guest with the QEMU `pci-mmio-bridge` device wired to
+the host SPDK NVMe controller, then inside the guest:
+
+```bash
+# GPU __device__ code issues a KV Store, then a KV Retrieve into VRAM
+xio-tester nvme-ep --controller /dev/nvme0 \
+    --kv-op store    --key gpukey01 --value-size 4096 --write-io 1 --pci-mmio-bridge
+xio-tester nvme-ep --controller /dev/nvme0 \
+    --kv-op retrieve --key gpukey01 --value-size 4096 --read-io 1 \
+    --memory-mode 8 --pci-mmio-bridge          # value lands in GPU VRAM
+```
+
+Verify the object reached Ceph from the host:
+
+```bash
+rados -p kvpool -N kvns stat $(printf 'gpukey01' | xxd -p)
+```
+
+See [`flow-a-gpu-initiated.md`](flow-a-gpu-initiated.md) and the bundled
+[`rocm-xio/examples/stage2_kv_rados_gpu.sh`](../rocm-xio/examples/stage2_kv_rados_gpu.sh).
+
+## Step 3 — Flow B: NIXL round-trip over the same target
+
+```bash
+cd nixl
+# point the agent at the listener dir from Step 1
+NIXL_RADOS_NKV_VFU_ADDR=/var/run/muser/domain/kv/0 \
+    ./src/plugins/rados-nkv/run_roundtrip_rados.sh
+```
+
+The script Stores via `NIXL_WRITE`, Retrieves via `NIXL_READ`, probes with
+`queryMem` (KV Exist), and asserts the value is a Ceph object. See
+[`flow-b-host-consumers.md`](flow-b-host-consumers.md).
+
+## Step 4 — Flow B: publish + load model weights
+
+```bash
+cd rados-nkv-weights && . .venv/bin/activate
+python - <<'PY'
+from rados_nkv_weights.nvmekv_client import NvmeKvClient
+from rados_nkv_weights import publish, load
+vfu = "/var/run/muser/domain/kv/0"
+with NvmeKvClient.open_publisher(vfu) as kv:            # admin write path
+    publish(kv, "demo/model@rev1", {
+        "w": {"fp16": ("float16", (1024,), b"\xab" * 2048)},
+    })
+with NvmeKvClient.open_loader(vfu) as kv:               # read-only loader path
+    tensors = load(kv, "demo/model@rev1", "fp16")
+    assert tensors["w"] == b"\xab" * 2048
+print("weights round-trip OK")
+PY
+```
+
+## What the demo proves
+
+- A GPU with **no host CPU in the data loop** persists and fetches values to
+  Ceph over NVMe-KV, value landing in VRAM (Flow A).
+- The **same** controller and `kvdev_rados` backend serve production host
+  consumers — llm-d KV-cache offload via NIXL, and model-weights distribution
+  (Flow B).
+- The KV namespace is backend-agnostic: identical client code runs against
+  `kvdev_mem` (dev) and `kvdev_rados` (real Ceph).
+- The per-namespace **read-only / admin** capability split is enforced
+  target-side, so a loader fleet can multi-attach a catalog it cannot mutate.
+
+## Troubleshooting pointers
+
+- Target won't enumerate as KV: confirm the namespace was added with
+  `nvmf_subsystem_add_kv_ns` (CSI=KV), not a block ns.
+- Host consumer can't find the namespace: check `vfu_addr` is the listener
+  directory and `nsid=0` (auto-select) or the real KV nsid.
+- `Store` rejected: the namespace is read-only — use an admin/publisher
+  connection.
+- GPU doorbell not reaching the BAR: verify the QEMU `pci-mmio-bridge` device is
+  attached and `--pci-mmio-bridge` is passed to `xio-tester`.

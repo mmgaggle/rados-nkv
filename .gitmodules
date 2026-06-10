@@ -1,0 +1,20 @@
+[submodule "spdk"]
+	path = spdk
+	url = https://github.com/mmgaggle/spdk.git
+	branch = rados-nkv
+[submodule "rocm-xio"]
+	path = rocm-xio
+	url = https://github.com/mmgaggle/rocm-xio.git
+	branch = nvme-kv
+[submodule "nixl"]
+	path = nixl
+	url = https://github.com/mmgaggle/nixl.git
+	branch = rados-nkv
+[submodule "qemu"]
+	path = qemu
+	url = https://github.com/sbates130272/qemu.git
+	branch = dev/stephen/pci-mmio-bridge-submit
+[submodule "rados-nkv-weights"]
+	path = rados-nkv-weights
+	url = git@github.ibm.com:ceph/rados-nkv-weights.git
+	branch = main

@@ -1,0 +1,21 @@
+Copyright 2026 Kyle Bader / IBM Corporation
+
+The integration content in this repository — the documentation under docs/,
+the diagrams authored here (docs/diagrams/overview.mmd), and any scripts under
+scripts/ — is licensed under the Apache License, Version 2.0. You may obtain a
+copy of the License at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Each submodule referenced by this repository is a separate work distributed
+under its own upstream license, which governs that submodule's contents:
+
+    spdk              BSD-3-Clause   (github.com/mmgaggle/spdk @ rados-nkv)
+    rocm-xio          MIT            (github.com/mmgaggle/rocm-xio @ nvme-kv)
+    nixl              Apache-2.0     (github.com/mmgaggle/nixl @ rados-nkv)
+    qemu              GPL-2.0        (github.com/sbates130272/qemu)
+    rados-nkv-weights Apache-2.0     (github.ibm.com/ceph/rados-nkv-weights @ main)
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied.

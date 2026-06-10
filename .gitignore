@@ -1,0 +1,5 @@
+# Local build/scratch — submodules carry their own .gitignore
+*.swp
+*~
+.DS_Store
+/scratch/

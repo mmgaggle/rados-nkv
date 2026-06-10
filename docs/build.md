@@ -1,0 +1,109 @@
+# Building the stack
+
+Everything links against a built **SPDK** tree, so SPDK is built first. The
+other components are independent of each other.
+
+```
+                 ┌─────────────┐
+                 │  spdk       │  (build first — provides libspdk_nvme,
+                 └──────┬──────┘   kvdev modules, and kv_host_shim.{c,h})
+        ┌───────────────┼───────────────┬──────────────────┐
+        ▼               ▼               ▼                  ▼
+   ┌─────────┐    ┌──────────┐   ┌───────────────┐   ┌──────────┐
+   │ rocm-xio│    │  nixl    │   │ rados-nkv-    │   │  qemu    │
+   │ nvme-ep │    │RADOS_NKV │   │ weights       │   │ pci-mmio │
+   │ (Flow A)│    │ (Flow B) │   │ (Flow B)      │   │ -bridge  │
+   └─────────┘    └──────────┘   └───────────────┘   └──────────┘
+```
+
+Populate submodules first (see the root `README.md`):
+
+```bash
+git submodule update --init --recursive   # or per-component, listed there
+```
+
+The per-component instructions below are summaries; the authoritative build
+docs live in each submodule (`spdk/README.md`, `rocm-xio/INSTALL.md`,
+`nixl/README.md`, `rados-nkv-weights/README.md`, QEMU's `docs/`).
+
+## 1. SPDK — the substrate
+
+```bash
+cd spdk
+git submodule update --init        # SPDK's own submodules (dpdk, isa-l, ...)
+./configure --with-rbd             # librbd/librados for the rados kvdev backend
+make -j"$(nproc)"
+```
+
+This yields `build/lib/libspdk_nvme.a` and friends, the `kvdev_mem` / `kvdev_rados`
+modules, and `test/nvmf/kv_shim/kv_host_shim.{c,h}` — the inputs every other
+component needs.
+
+## 2. rocm-xio — Flow A (GPU-initiated)
+
+Needs ROCm/HIP and a supported AMD GPU (gfx1151). See `rocm-xio/INSTALL.md` for
+dependencies and supported hardware.
+
+```bash
+cd rocm-xio
+cmake --preset <preset>            # see CMakePresets.json
+cmake --build build -j"$(nproc)"
+```
+
+Produces `xio-tester` with the `nvme-ep --kv-op` path. KV is an additive flag —
+no extra build options beyond the standard rocm-xio build.
+
+## 3. qemu — the pci-mmio-bridge (Flow A)
+
+Build the `pci-mmio-bridge` QEMU from the
+`dev/stephen/pci-mmio-bridge-submit` branch:
+
+```bash
+cd qemu
+./configure --target-list=x86_64-softmmu --enable-kvm
+make -j"$(nproc)"
+```
+
+Use this `qemu-system-x86_64` to launch the GPU-passthrough guest with the
+`pci-mmio-bridge` device wired to the host SPDK NVMe controller.
+
+## 4. nixl — Flow B (RADOS_NKV backend)
+
+Point the build at the SPDK tree from step 1:
+
+```bash
+cd nixl
+meson setup build \
+    -Dspdk_root=$PWD/../spdk \
+    -Dspdk_kv_shim_dir=$PWD/../spdk/test/nvmf/kv_shim \
+    -Drados_nkv_build_test=true
+ninja -C build
+ninja -C build test               # unit suite incl. key-derivation tests
+```
+
+The plugin is skipped automatically if `libspdk_nvme.a` / the shim aren't found.
+
+## 5. rados-nkv-weights — Flow B (weights catalog)
+
+Pure-Python core (pyarrow + numpy); the native NVMe-KV transport is an optional
+`.so` built against SPDK:
+
+```bash
+cd rados-nkv-weights
+python -m venv .venv && . .venv/bin/activate
+pip install pyarrow numpy && pip install -e .
+python -m pytest tests/ -v        # exercises the in-memory client
+
+# Native transport against the real target (optional):
+SPDK_ROOT=$PWD/../spdk ./native/build.sh   # -> native/libradosnkv_kvshim.so
+```
+
+## Quick dev loop (no Ceph, no GPU)
+
+You can exercise the host consumers end-to-end against the **in-memory** kvdev:
+
+- NIXL: `nixl/src/plugins/rados-nkv/run_roundtrip.sh` (uses `kvdev_mem`).
+- weights: `pytest` against `InMemoryKvClient`.
+
+Bring up real Ceph only when you want `kvdev_rados` (e.g. SPDK's `vstart`-style
+RADOS, or an existing cluster's `ceph.conf` + keyring).
