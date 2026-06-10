@@ -48,8 +48,14 @@ PCI_MMIO_BRIDGE=on  make vm-run-spdk        # 4. launch, GPU passed through, NVM
 See [`../docs/flow-a-gpu-initiated.md`](../docs/flow-a-gpu-initiated.md) for the
 GPU-side commands and the on-the-wire KV encoding.
 
-> **ROCm specifics:** `build-rocm-xio.sh` defaults to ROCm 6.4.1 on Ubuntu noble
-> with `HSA_OVERRIDE_GFX_VERSION=11.5.1` (gfx1151 / Strix Halo 8060S). Override
-> `ROCM_VERSION` / `GFX_OVERRIDE` for a different target. The dev host itself runs
-> Fedora ROCm 7.1.1 — the guest is provisioned independently, so its ROCm version
-> is its own knob.
+> **ROCm specifics:** `build-rocm-xio.sh` uses AMD's `amdgpu-install` .deb (default
+> **7.2.4** on Ubuntu noble) only to wire the repos, then `apt install`s the
+> minimal HIP build stack — `rocm-hip-runtime-dev rocm-cmake rocminfo libdrm-dev
+> libcli11-dev` with `--no-install-recommends`. rocm-xio needs only
+> `find_package(hip)` + `hsa-runtime64`, so this deliberately skips the ROCm math
+> libraries (rocblas/rocfft/composablekernel, ~10 GB) that the full `hiplibsdk`
+> usecase pulls. No kernel driver (`--no-dkms` equivalent — the build VM has no
+> GPU; the driver is a runtime/passthrough concern). gfx1151 (Strix Halo 8060S)
+> is native in ROCm 7.x, so no `HSA_OVERRIDE_GFX_VERSION` unless you pass
+> `GFX_OVERRIDE`. Override `ROCM_VERSION` for a different release. The dev host
+> itself runs Fedora ROCm 7.1.1, independent of the guest.

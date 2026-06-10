@@ -45,6 +45,14 @@ mkdir -p "${IMAGES}"
 CLOUDIMG="${IMAGES}/${RELEASE}-server-cloudimg-amd64.img"
 DISK="${IMAGES}/${VM_NAME}.qcow2"
 SEED="${IMAGES}/${VM_NAME}-seed.img"
+CONSOLE_LOG="${IMAGES}/${VM_NAME}-console.log"
+
+if [ -n "${DRY_RUN:-}" ]; then
+	echo "DRY_RUN: would download ${CLOUDIMG} (if missing), build the cloud-init seed"
+	echo "         from ${HERE}/cloud-init, create ${DISK} (${SIZE}), and boot once"
+	echo "         headless to provision (console -> ${CONSOLE_LOG})."
+	exit 0
+fi
 
 # ---- cloud image -----------------------------------------------------------
 if [ ! -f "${CLOUDIMG}" ]; then
@@ -59,20 +67,31 @@ qemu-img create -f qcow2 -F qcow2 -b "${CLOUDIMG}" "${DISK}" >/dev/null
 qemu-img resize "${DISK}" "${SIZE}" >/dev/null
 
 # ---- assemble the cloud-init seed ------------------------------------------
-# Embed build-rocm-xio.sh into user-data (indented 6 spaces under content: |).
 workdir="$(mktemp -d)"
 trap 'rm -rf "${workdir}"' EXIT
-sed 's/^/      /' "${HERE}/build-rocm-xio.sh" > "${workdir}/script.indented"
-# Replace the @BUILD_ROCM_XIO@ marker with the indented script.
-awk '
-  /@BUILD_ROCM_XIO@/ { while ((getline line < script) > 0) print line; next }
-  { print }
-' script="${workdir}/script.indented" "${HERE}/cloud-init/user-data.in" \
+# Embed build-rocm-xio.sh as base64 (the write_files entry sets encoding: b64).
+# This is robust against the YAML whitespace/tab pitfalls of inlining a shell
+# script into a block scalar. base64 alphabet has no sed-special chars and no
+# '|', so a '|'-delimited substitution is safe.
+b64="$(base64 -w0 "${HERE}/build-rocm-xio.sh")"
+sed "s|@BUILD_ROCM_XIO_B64@|${b64}|" "${HERE}/cloud-init/user-data.in" \
 	> "${workdir}/user-data"
+
+# Guard: a malformed user-data makes cloud-init silently apply an empty config
+# (no packages/runcmd/poweroff), so validate YAML up front when we can.
+if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
+	python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' "${workdir}/user-data" \
+		|| { echo "build-image: generated user-data is not valid YAML" >&2; exit 1; }
+fi
+
 cp "${HERE}/cloud-init/meta-data" "${workdir}/meta-data"
 cloud-localds "${SEED}" "${workdir}/user-data" "${workdir}/meta-data"
 
-# ---- provisioning boot: cloud-init runs, then powers off -------------------
+# ---- provisioning boot: cloud-init runs build-rocm-xio.sh, then powers off --
+# Headless and non-interactive: serial to a log file, no stdio monitor (so a
+# closed stdin can't kill it), -no-reboot so a guest reboot exits QEMU, and a
+# timeout backstop in case cloud-init wedges. The guest powers off when done
+# (user-data power_state), and QEMU exits with it.
 ACCEL=(); [ -w /dev/kvm ] && ACCEL=(-enable-kvm -cpu host)
 CMD=( "${QEMU}"
 	"${ACCEL[@]}"
@@ -80,12 +99,18 @@ CMD=( "${QEMU}"
 	-drive "file=${DISK},format=qcow2,if=virtio"
 	-drive "file=${SEED},format=raw,if=virtio"
 	-netdev user,id=net0 -device virtio-net-pci,netdev=net0
-	-nographic -serial mon:stdio )
+	-display none -serial "file:${CONSOLE_LOG}" -monitor none -no-reboot )
 
-if [ -n "${DRY_RUN:-}" ]; then
-	printf '%q ' "${CMD[@]}"; echo; exit 0
+echo "build-image: provisioning ${DISK} (installs ROCm + builds rocm-xio; can take 20-40 min)"
+echo "build-image: guest console -> ${CONSOLE_LOG}"
+if timeout "${BOOT_TIMEOUT:-3600}" "${CMD[@]}" </dev/null; then
+	echo "build-image: done — ${DISK} provisioned. Launch with: make vm-run"
+else
+	rc=$?
+	if [ "${rc}" = 124 ]; then
+		echo "build-image: TIMED OUT after ${BOOT_TIMEOUT:-3600}s — see ${CONSOLE_LOG}" >&2
+	else
+		echo "build-image: provisioning boot exited rc=${rc} — see ${CONSOLE_LOG}" >&2
+	fi
+	exit "${rc}"
 fi
-
-echo "build-image: provisioning ${DISK} (installs ROCm + builds rocm-xio; this takes a while)"
-"${CMD[@]}"
-echo "build-image: done — ${DISK} provisioned. Launch with: make vm-run"

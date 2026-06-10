@@ -16,42 +16,45 @@
 #   ROCM_XIO_REPO      rocm-xio git remote                     (default mmgaggle fork)
 #   ROCM_XIO_BRANCH    rocm-xio branch (matches the submodule) (default nvme-kv)
 #   ROCM_XIO_PRESET    CMake preset                            (default release)
-#   GFX_OVERRIDE       HSA_OVERRIDE_GFX_VERSION for the target (default 11.5.1 / gfx1151)
+#   GFX_OVERRIDE       HSA_OVERRIDE_GFX_VERSION (only if set)  (default: unset)
 #
-# NOTE: Strix Halo (gfx1151) needs a recent ROCm; if your target GPU or ROCm
-# release differs, override ROCM_VERSION / GFX_OVERRIDE. Building rocm-xio needs
-# the ROCm/HIP toolchain present but not a GPU, so this runs fine during the
-# headless provisioning boot.
+# ROCm: we use AMD's amdgpu-install .deb only to wire up the repos, then apt
+# install the MINIMAL HIP build stack. rocm-xio needs only find_package(hip) +
+# hsa-runtime64 — NOT the ROCm math libraries (rocblas/rocfft/composablekernel,
+# ~10 GB) that the full hiplibsdk usecase pulls. rocm-hip-runtime-dev gives the
+# HIP compiler + runtime + headers + hsa; no kernel driver (the build VM has no
+# GPU — the amdgpu/kfd driver is a runtime concern at passthrough time). gfx1151
+# (Strix Halo) is native in ROCm 7.x, so no HSA_OVERRIDE unless you ask for it.
 set -euxo pipefail
 
-ROCM_VERSION="${ROCM_VERSION:-6.4.1}"
+ROCM_VERSION="${ROCM_VERSION:-7.2.4}"
 UBUNTU_CODENAME="${UBUNTU_CODENAME:-noble}"
 ROCM_XIO_REPO="${ROCM_XIO_REPO:-https://github.com/mmgaggle/rocm-xio.git}"
 ROCM_XIO_BRANCH="${ROCM_XIO_BRANCH:-nvme-kv}"
 ROCM_XIO_PRESET="${ROCM_XIO_PRESET:-release}"
-GFX_OVERRIDE="${GFX_OVERRIDE:-11.5.1}"
+GFX_OVERRIDE="${GFX_OVERRIDE:-}"
 ROCM_XIO_SRC="${ROCM_XIO_SRC:-/opt/rocm-xio}"
 
 export DEBIAN_FRONTEND=noninteractive
 
-# ---- 1. ROCm stack (skip if already present) -------------------------------
+# ---- 1. ROCm stack via amdgpu-install (skip if already present) ------------
 if [ ! -d /opt/rocm ]; then
-	mkdir -p /etc/apt/keyrings
-	curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key \
-		| gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
-
-	echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] \
-https://repo.radeon.com/amdgpu/${ROCM_VERSION}/ubuntu ${UBUNTU_CODENAME} main" \
-		> /etc/apt/sources.list.d/amdgpu.list
-	echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] \
-https://repo.radeon.com/rocm/apt/${ROCM_VERSION} ${UBUNTU_CODENAME} main" \
-		> /etc/apt/sources.list.d/rocm.list
-	printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n' \
-		> /etc/apt/preferences.d/rocm-pin-600
+	base="https://repo.radeon.com/amdgpu-install/${ROCM_VERSION}/ubuntu/${UBUNTU_CODENAME}"
+	# Discover the exact installer .deb (its filename carries a build number).
+	deb="$(curl -fsSL "${base}/" \
+		| grep -oE 'amdgpu-install_[0-9A-Za-z._~-]+_all\.deb' | sort | tail -1)"
+	[ -n "${deb}" ] || { echo "no amdgpu-install deb for ROCm ${ROCM_VERSION}/${UBUNTU_CODENAME}" >&2; exit 1; }
+	curl -fsSL -o "/tmp/${deb}" "${base}/${deb}"
 
 	apt-get update
-	# rocm-hip-sdk pulls the HIP compiler + runtime needed to build rocm-xio.
-	apt-get install -y rocm-hip-sdk rocm-smi-lib
+	apt-get install -y "/tmp/${deb}"   # configures the repo.radeon.com apt repos
+	apt-get update
+	# Minimal HIP build stack (NOT hiplibsdk): rocm-hip-runtime-dev = HIP compiler
+	# (rocm-llvm) + runtime + headers + hsa-rocr; rocm-cmake = the CMake modules.
+	# --no-install-recommends keeps the ROCm math libraries out. libdrm-dev +
+	# libcli11-dev are rocm-xio's other build deps (per its INSTALL.md).
+	apt-get install -y --no-install-recommends \
+		rocm-hip-runtime-dev rocm-cmake rocminfo libdrm-dev libcli11-dev
 fi
 
 # Make the ROCm toolchain discoverable for this script and future logins.
@@ -59,10 +62,8 @@ export PATH="/opt/rocm/bin:${PATH}"
 echo '/opt/rocm/lib'     > /etc/ld.so.conf.d/rocm.conf
 echo '/opt/rocm/lib64'  >> /etc/ld.so.conf.d/rocm.conf
 ldconfig
-cat > /etc/profile.d/rocm.sh <<EOF
-export PATH=/opt/rocm/bin:\$PATH
-export HSA_OVERRIDE_GFX_VERSION=${GFX_OVERRIDE}
-EOF
+echo 'export PATH=/opt/rocm/bin:$PATH' > /etc/profile.d/rocm.sh
+[ -n "${GFX_OVERRIDE}" ] && echo "export HSA_OVERRIDE_GFX_VERSION=${GFX_OVERRIDE}" >> /etc/profile.d/rocm.sh
 
 # ---- 2. rocm-xio (clone the pinned fork/branch, build xio-tester) ----------
 if [ ! -d "${ROCM_XIO_SRC}/.git" ]; then

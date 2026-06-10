@@ -1,8 +1,9 @@
 #cloud-config
-# Template consumed by provisioning/build-image.sh. The @BUILD_ROCM_XIO@ marker
-# is replaced with the indented contents of provisioning/build-rocm-xio.sh at
-# seed-build time, then the assembled user-data drives a one-shot provisioning
-# boot (cloud-init installs packages, writes the script, runs it, powers off).
+# Template consumed by provisioning/build-image.sh. The @BUILD_ROCM_XIO_B64@
+# marker is replaced with base64(provisioning/build-rocm-xio.sh) at seed-build
+# time (encoding: b64 below), then the assembled user-data drives a one-shot
+# provisioning boot (cloud-init installs packages, writes the script, runs it,
+# powers off).
 hostname: ceph-gpu
 disable_root: true
 ssh_pwauth: true
@@ -33,8 +34,8 @@ write_files:
   - path: /usr/local/sbin/build-rocm-xio.sh
     owner: root:root
     permissions: '0755'
-    content: |
-@BUILD_ROCM_XIO@
+    encoding: b64
+    content: @BUILD_ROCM_XIO_B64@
 
 runcmd:
   - [ /usr/local/sbin/build-rocm-xio.sh ]
