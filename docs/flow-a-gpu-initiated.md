@@ -55,15 +55,13 @@ size; `0x85` = invalid value size. Full detail in
 
 ### 1. Stand up the SPDK NVMe-KV-on-RADOS target
 
+With `nvmf_tgt` running, one command brings up the whole target (see
+[`scripts/rados-nkv`](../scripts/rados-nkv) and [`demo-e2e.md`](demo-e2e.md)
+Step 1 for the underlying RPC sequence and options):
+
 ```bash
-# in the SPDK tree, with nvmf_tgt running
-scripts/rpc.py nvmf_create_transport -t VFIOUSER -q 1024 -m 16
-scripts/rpc.py kvdev_rados_register_cluster ceph0 \
-    --user admin --config-file ceph.conf --key-file keyring
-scripts/rpc.py kvdev_rados_create KvRados0 ceph0 kvpool --namespace kvns
-scripts/rpc.py nvmf_create_subsystem <nqn> -s SPDKKVR01 -a
-scripts/rpc.py nvmf_subsystem_add_kv_ns <nqn> KvRados0        # CSI=KV namespace
-scripts/rpc.py nvmf_subsystem_add_listener <nqn> -t VFIOUSER -a <muser> -s 0
+scripts/rados-nkv up          # transport + kvdev_rados + subsystem + CSI=KV ns + listener
+# → KV target up at /var/run/muser/domain/kv/0
 ```
 
 The guest Linux NVMe driver enumerates this KV-only controller directly

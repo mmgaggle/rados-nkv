@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+#
+# rados-nkv — bring an SPDK NVMe-KV-on-RADOS target up or down with one command.
+#
+# Wraps the SPDK JSON-RPC sequence (scripts/rpc.py) that stands up a CSI=KV
+# namespace over the VFIOUSER transport, backed by either a librados kvdev
+# (real Ceph) or an in-memory kvdev (no cluster needed). The resulting
+# vfu_addr is what rocm-xio (--controller), the NIXL RADOS_NKV backend
+# (vfu_addr), and rados-nkv-weights (NvmeKvClient) all attach to.
+#
+# Usage:
+#   scripts/rados-nkv up [options]      # create transport + backend + subsystem + ns + listener
+#   scripts/rados-nkv down [options]    # tear it back down
+#   scripts/rados-nkv status [options]  # show subsystems / clusters
+#   scripts/rados-nkv help
+#
+# Assumes an nvmf_tgt is already running (see docs/demo-e2e.md). Every setting
+# has an env-var default that a flag overrides:
+#
+#   SPDK_ROOT     SPDK tree with scripts/rpc.py     (default: <repo>/spdk)
+#   RPC_SOCK      nvmf_tgt RPC socket               (default: /var/run/spdk.sock)
+#   BACKEND       rados | mem                       (default: rados; --mem = mem)
+#   POOL          Ceph pool (maps to subsystem)     (default: kvpool)
+#   CEPH_NS       Ceph namespace (maps to KV ns)    (default: kvns)
+#   NQN           subsystem NQN                     (default: nqn.2026-06.io.ceph-gpu:kv)
+#   SERIAL        subsystem serial                  (default: SPDKKVR01)
+#   VFU_DIR       VFIOUSER listener directory       (default: /var/run/muser/domain/kv)
+#   CLUSTER       rados cluster handle name         (default: ceph0)
+#   KVDEV         kvdev name                        (default: KvRados0 / KvMem0)
+#   CEPH_USER     Ceph client id                    (default: admin)
+#   CEPH_CONF     ceph.conf path                    (default: /etc/ceph/ceph.conf)
+#   CEPH_KEYRING  keyring path                      (default: <dir of CEPH_CONF>/keyring)
+#   READ_ONLY     0 | 1  (--read-only sets 1)       (default: 0)
+#   TR_QDEPTH     VFIOUSER queue depth              (default: 1024)
+#   TR_MAXQ       VFIOUSER max qpairs               (default: 16)
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ---- defaults (env overridable) ------------------------------------------
+SPDK_ROOT="${SPDK_ROOT:-$REPO_ROOT/spdk}"
+RPC_SOCK="${RPC_SOCK:-/var/run/spdk.sock}"
+BACKEND="${BACKEND:-rados}"
+POOL="${POOL:-kvpool}"
+CEPH_NS="${CEPH_NS:-kvns}"
+NQN="${NQN:-nqn.2026-06.io.ceph-gpu:kv}"
+SERIAL="${SERIAL:-SPDKKVR01}"
+VFU_DIR="${VFU_DIR:-/var/run/muser/domain/kv}"
+CLUSTER="${CLUSTER:-ceph0}"
+KVDEV="${KVDEV:-}"
+CEPH_USER="${CEPH_USER:-admin}"
+CEPH_CONF="${CEPH_CONF:-/etc/ceph/ceph.conf}"
+CEPH_KEYRING="${CEPH_KEYRING:-}"
+READ_ONLY="${READ_ONLY:-0}"
+TR_QDEPTH="${TR_QDEPTH:-1024}"
+TR_MAXQ="${TR_MAXQ:-16}"
+
+die() { echo "rados-nkv: $*" >&2; exit 1; }
+
+# ---- arg parsing ---------------------------------------------------------
+CMD="${1:-help}"; shift || true
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--mem)          BACKEND=mem ;;
+		--rados)        BACKEND=rados ;;
+		--read-only|-R) READ_ONLY=1 ;;
+		--spdk)         SPDK_ROOT="$2"; shift ;;
+		--sock)         RPC_SOCK="$2"; shift ;;
+		--pool)         POOL="$2"; shift ;;
+		--namespace)    CEPH_NS="$2"; shift ;;
+		--nqn)          NQN="$2"; shift ;;
+		--vfu-dir)      VFU_DIR="$2"; shift ;;
+		--cluster)      CLUSTER="$2"; shift ;;
+		--kvdev)        KVDEV="$2"; shift ;;
+		--user)         CEPH_USER="$2"; shift ;;
+		--conf)         CEPH_CONF="$2"; shift ;;
+		--keyring)      CEPH_KEYRING="$2"; shift ;;
+		-h|--help)      CMD=help ;;
+		*)              die "unknown option: $1 (try 'rados-nkv help')" ;;
+	esac
+	shift
+done
+
+# derived defaults
+[ -n "$KVDEV" ] || { [ "$BACKEND" = mem ] && KVDEV=KvMem0 || KVDEV=KvRados0; }
+[ -n "$CEPH_KEYRING" ] || CEPH_KEYRING="$(dirname "$CEPH_CONF")/keyring"
+VFU_ADDR="$VFU_DIR/0"
+RPC="$SPDK_ROOT/scripts/rpc.py"
+
+rpc()      { "$RPC" -s "$RPC_SOCK" "$@"; }                 # must succeed
+rpc_try()  { "$RPC" -s "$RPC_SOCK" "$@" 2>/dev/null || true; }  # idempotent / best-effort
+
+preflight() {
+	[ -x "$RPC" ] || [ -f "$RPC" ] || die "rpc.py not found at $RPC (set --spdk / SPDK_ROOT)"
+	rpc spdk_get_version >/dev/null 2>&1 || \
+		die "no nvmf_tgt reachable on $RPC_SOCK — start it first (see docs/demo-e2e.md)"
+}
+
+# ---- subcommands ---------------------------------------------------------
+do_up() {
+	preflight
+	echo "rados-nkv up: backend=$BACKEND nqn=$NQN read_only=$READ_ONLY"
+
+	# 1. VFIOUSER transport (idempotent — tolerated if it already exists)
+	rpc_try nvmf_create_transport -t VFIOUSER -q "$TR_QDEPTH" -m "$TR_MAXQ"
+
+	# 2. KV backend device
+	if [ "$BACKEND" = rados ]; then
+		[ -f "$CEPH_CONF" ] || die "ceph conf not found: $CEPH_CONF (set --conf / CEPH_CONF)"
+		echo "  → kvdev_rados_register_cluster $CLUSTER (user=$CEPH_USER conf=$CEPH_CONF)"
+		rpc_try kvdev_rados_register_cluster "$CLUSTER" \
+			--user "$CEPH_USER" --config-file "$CEPH_CONF" --key-file "$CEPH_KEYRING"
+		echo "  → kvdev_rados_create $KVDEV $CLUSTER $POOL --namespace $CEPH_NS"
+		rpc kvdev_rados_create "$KVDEV" "$CLUSTER" "$POOL" --namespace "$CEPH_NS"
+	else
+		echo "  → kvdev_mem_create $KVDEV"
+		rpc kvdev_mem_create "$KVDEV"
+	fi
+
+	# 3. subsystem + CSI=KV namespace
+	echo "  → nvmf_create_subsystem $NQN"
+	rpc_try nvmf_create_subsystem "$NQN" -s "$SERIAL" -a
+	local ro=(); [ "$READ_ONLY" = 1 ] && ro=(--read-only)
+	echo "  → nvmf_subsystem_add_kv_ns $NQN $KVDEV ${ro[*]}"
+	rpc nvmf_subsystem_add_kv_ns "$NQN" "$KVDEV" "${ro[@]}"
+
+	# 4. VFIOUSER listener
+	mkdir -p "$VFU_DIR"
+	echo "  → nvmf_subsystem_add_listener $NQN -t VFIOUSER -a $VFU_DIR -s 0"
+	rpc_try nvmf_subsystem_add_listener "$NQN" -t VFIOUSER -a "$VFU_DIR" -s 0
+
+	echo "KV target up at $VFU_ADDR"
+}
+
+do_down() {
+	preflight
+	echo "rados-nkv down: nqn=$NQN backend=$BACKEND"
+	rpc_try nvmf_delete_subsystem "$NQN"          # also drops its listeners + ns
+	if [ "$BACKEND" = rados ]; then
+		rpc_try kvdev_rados_delete "$KVDEV"
+		rpc_try kvdev_rados_unregister_cluster "$CLUSTER"
+	else
+		rpc_try kvdev_mem_delete "$KVDEV"
+	fi
+	echo "KV target torn down (VFIOUSER transport left in place)"
+}
+
+do_status() {
+	preflight
+	echo "== subsystems =="
+	rpc nvmf_get_subsystems
+	if [ "$BACKEND" = rados ]; then
+		echo "== rados clusters =="
+		rpc_try kvdev_rados_get_clusters
+	fi
+}
+
+usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d;s/^# \{0,1\}//'; }
+
+case "$CMD" in
+	up)      do_up ;;
+	down)    do_down ;;
+	status)  do_status ;;
+	help|"") usage ;;
+	*)       die "unknown command: $CMD (try 'rados-nkv help')" ;;
+esac

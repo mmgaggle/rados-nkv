@@ -5,6 +5,10 @@ Flow A, but from a host process over a **vfio-user loopback** (no VM, no
 network) — both linking the in-process SPDK **KV host shim**
 (`spdk/test/nvmf/kv_shim/kv_host_shim.{c,h}`).
 
+Stand up the target they attach to with [`scripts/rados-nkv up`](../scripts/rados-nkv)
+(add `--read-only` for the weights loader namespace, or `--mem` for a no-Ceph dev
+loop); the printed `vfu_addr` is what `vfu_addr` / `NvmeKvClient` take below.
+
 ![rados-nkv substrate](diagrams/rados-nkv.png)
 
 (Source: [`diagrams/rados-nkv.mmd`](diagrams/rados-nkv.mmd))

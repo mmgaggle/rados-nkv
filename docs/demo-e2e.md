@@ -32,27 +32,35 @@ at. Tear the cluster down afterward with `../src/stop.sh`.
 
 ## Step 1 — SPDK NVMe-KV target (the shared substrate)
 
-Start `nvmf_tgt`, then:
+Start `nvmf_tgt` from the SPDK build, then bring the KV-on-RADOS target up with
+the [`scripts/rados-nkv`](../scripts/rados-nkv) wrapper:
 
 ```bash
-cd spdk
-scripts/rpc.py nvmf_create_transport -t VFIOUSER -q 1024 -m 16
-scripts/rpc.py kvdev_rados_register_cluster ceph0 \
-    --user admin \
-    --config-file "$CEPH_CONF" \
-    --key-file "$(dirname "$CEPH_CONF")/keyring"   # vstart's admin keyring
-scripts/rpc.py kvdev_rados_create KvRados0 ceph0 kvpool --namespace kvns
-scripts/rpc.py nvmf_create_subsystem nqn.2026-06.io.ceph-gpu:kv -s SPDKKVR01 -a
-scripts/rpc.py nvmf_subsystem_add_kv_ns nqn.2026-06.io.ceph-gpu:kv KvRados0   # CSI=KV
-scripts/rpc.py nvmf_subsystem_add_listener nqn.2026-06.io.ceph-gpu:kv \
-    -t VFIOUSER -a /var/run/muser/domain/kv -s 0
+sudo spdk/build/bin/nvmf_tgt &        # the SPDK target (from the spdk submodule)
+
+scripts/rados-nkv up                  # picks up $CEPH_CONF from Step 0;
+                                      # pool=kvpool, namespace=kvns by default
+# → KV target up at /var/run/muser/domain/kv/0
 ```
 
-`vfu_addr` for the host consumers is the listener directory, e.g.
-`/var/run/muser/domain/kv/0`.
+`vfu_addr` for the host consumers (Steps 3–4) is the listener directory printed
+above, `/var/run/muser/domain/kv/0`. Tear it down later with
+`scripts/rados-nkv down`.
 
-> For a no-Ceph dev run, swap steps 0–1's `kvdev_rados_*` for
-> `kvdev_mem_create` — everything downstream is unchanged.
+Under the hood `up` runs the SPDK JSON-RPC sequence — `nvmf_create_transport`
+(VFIOUSER), `kvdev_rados_register_cluster` + `kvdev_rados_create`,
+`nvmf_create_subsystem`, `nvmf_subsystem_add_kv_ns` (CSI=KV), and
+`nvmf_subsystem_add_listener`. Useful variants:
+
+```bash
+scripts/rados-nkv up --read-only      # loader-style namespace (Retrieve/Exist only)
+scripts/rados-nkv up --mem            # in-memory kvdev — skip Step 0, no Ceph needed
+scripts/rados-nkv status              # show subsystems / rados clusters
+scripts/rados-nkv help                # all options + env-var defaults
+```
+
+> For a no-Ceph dev run, `scripts/rados-nkv up --mem` swaps the `kvdev_rados_*`
+> calls for `kvdev_mem_create` — Steps 2–4 are otherwise unchanged.
 
 ## Step 2 — Flow A: GPU-initiated Store + Retrieve
 

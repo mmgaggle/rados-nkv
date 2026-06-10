@@ -53,6 +53,12 @@ Start with the architecture, then pick a flow:
 - [`docs/demo-e2e.md`](docs/demo-e2e.md) — step-by-step bring-up of the full end-to-end demo.
 - [`docs/diagrams/`](docs/diagrams) — Mermaid + rendered PNGs.
 
+The [`scripts/rados-nkv`](scripts/rados-nkv) helper brings the SPDK NVMe-KV target
+up or down with one command (`scripts/rados-nkv up` / `down` / `status`),
+wrapping the SPDK JSON-RPC sequence. `--mem` selects the no-Ceph in-memory
+backend; `--read-only` creates a loader-style namespace. Run `scripts/rados-nkv help`
+for all options.
+
 ## Getting the code
 
 The submodules are **pinned to exact commits** but not vendored; populate them
