@@ -29,6 +29,7 @@ option(WITH_ROCM_XIO "Build rocm-xio (Flow A: GPU-initiated)"               ON)
 option(WITH_QEMU     "Build qemu (Flow A: pci-mmio-bridge)"                 ON)
 option(WITH_NIXL     "Build the NIXL RADOS_NKV backend (Flow B)"            ON)
 option(WITH_WEIGHTS  "Set up rados-nkv-weights (Flow B)"                    ON)
+option(WITH_QEMU_MINIMAL "Use qemu-minimal (guest VM tooling, Flow A)"      ON)
 
 # ---- knobs -----------------------------------------------------------------
 ProcessorCount(NPROC)
@@ -179,6 +180,12 @@ if(WITH_WEIGHTS)
   list(APPEND INIT_TARGETS init-weights)
 endif()
 
+# ---- qemu-minimal: guest VM tooling (no compile; scripts only) -------------
+if(WITH_QEMU_MINIMAL)
+  add_init(qemu-minimal qemu-minimal)
+  list(APPEND INIT_TARGETS init-qemu-minimal)
+endif()
+
 # ---- aggregate targets: build / init ---------------------------------------
 add_custom_target(build)
 if(BUILD_TARGETS)
@@ -224,3 +231,27 @@ add_custom_target(status
   COMMAND "${REPO}/scripts/rados-nkv" status
   USES_TERMINAL
   COMMENT "show the SPDK NVMe-KV target status")
+
+# ---- guest VM (Flow A): build the image, launch it -------------------------
+add_custom_target(vm
+  COMMAND "${REPO}/provisioning/build-image.sh"
+  USES_TERMINAL
+  COMMENT "build the ROCm + rocm-xio guest image (cloud-init)")
+
+# Proven bring-up: GPU passthrough + pci-mmio-bridge + emulated NVMe.
+add_custom_target(vm-run
+  COMMAND "${REPO}/provisioning/launch-bridge-vm.sh"
+  USES_TERMINAL
+  COMMENT "launch the guest (vendored run-qemu-pci-mmio-bridge)")
+
+# Full GPU->SPDK->RADOS path: qemu-minimal run-vm with the SPDK vfio-user NVMe-KV
+# controller (set VFIO_USERDEV / PCI_HOSTDEV / PCI_MMIO_BRIDGE in the env).
+add_custom_target(vm-run-spdk
+  COMMAND "${REPO}/provisioning/run-guest.sh"
+  USES_TERMINAL
+  COMMENT "launch the guest wired to the SPDK NVMe-KV target (run-vm)")
+
+add_custom_target(vm-vfio-rules
+  COMMAND "${REPO}/qemu-minimal/udev/install-vfio-rules"
+  USES_TERMINAL
+  COMMENT "install qemu-minimal's VFIO udev rules (may require sudo)")

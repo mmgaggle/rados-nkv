@@ -22,3 +22,7 @@
 	path = ceph
 	url = https://github.com/ceph/ceph.git
 	branch = tentacle
+[submodule "qemu-minimal"]
+	path = qemu-minimal
+	url = https://github.com/sbates130272/qemu-minimal.git
+	branch = main

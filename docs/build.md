@@ -40,6 +40,10 @@ make build-spdk          # one component: ceph spdk rocm-xio qemu nixl weights
 make init-nixl           # init a single submodule
 make vstart   /  stop    # bring a throwaway Ceph cluster up / down
 make up / down / status  # the SPDK NVMe-KV target (wraps scripts/rados-nkv)
+make vm                  # build the ROCm + rocm-xio guest image (Flow A)
+make vm-run              # launch the guest (proven pci-mmio-bridge bring-up)
+make vm-run-spdk         # launch wired to the SPDK NVMe-KV target
+make vm-vfio-rules       # install VFIO udev rules (may need sudo)
 make deps-ceph           # run ceph/install-deps.sh (may need sudo)
 make distclean           # remove build/
 ```

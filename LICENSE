@@ -15,6 +15,7 @@ under its own upstream license, which governs that submodule's contents:
     rocm-xio          MIT            (github.com/mmgaggle/rocm-xio @ nvme-kv)
     nixl              Apache-2.0     (github.com/mmgaggle/nixl @ rados-nkv)
     qemu              GPL-2.0        (github.com/sbates130272/qemu)
+    qemu-minimal      see upstream   (github.com/sbates130272/qemu-minimal)
     rados-nkv-weights Apache-2.0     (github.ibm.com/ceph/rados-nkv-weights @ main)
 
 Unless required by applicable law or agreed to in writing, software distributed

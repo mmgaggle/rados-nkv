@@ -39,6 +39,7 @@ path — just the NVMe KV command set over an SPDK vfio-user controller backed b
 | [`spdk`](spdk) | [`mmgaggle/spdk`](https://github.com/mmgaggle/spdk/tree/rados-nkv) | `rados-nkv` | **The substrate.** NVMe-KV command set, the `kvdev` device layer with `mem` and `rados` (librados) backends, the NVMf KV controller (`ctrlr_kvdev`, CSI=KV namespaces, read-only & Exec gates), and the in-process **KV host shim** that the host-side consumers link against. |
 | [`rocm-xio`](rocm-xio) | [`mmgaggle/rocm-xio`](https://github.com/mmgaggle/rocm-xio/tree/nvme-kv) | `nvme-kv` | **GPU-initiated path.** `nvme-ep --kv-op store/retrieve` — GPU `__device__` code builds the KV SQE, rings the doorbell, polls the CQ, and the value lands in host RAM or VRAM (`--memory-mode 8`). |
 | [`qemu`](qemu) | [`sbates130272/qemu`](https://github.com/sbates130272/qemu) | `dev/stephen/pci-mmio-bridge-submit` | **GPU↔NVMe bridge.** The `pci-mmio-bridge` device polls a guest shadow ring and forwards the GPU's doorbell MMIO to the SPDK NVMe BAR, so the passed-through GPU can drive a vfio-user NVMe controller. |
+| [`qemu-minimal`](qemu-minimal) | [`sbates130272/qemu-minimal`](https://github.com/sbates130272/qemu-minimal) | `main` | **Guest VM tooling.** Cloud-init VM creation (`gen-vm`) and a launcher (`run-vm`) with the knobs this demo needs — GPU `vfio-pci` passthrough, libvfio-user sockets, and the `pci-mmio-bridge` device. The provisioning layer here builds on it. |
 | [`nixl`](nixl) | [`mmgaggle/nixl`](https://github.com/mmgaggle/nixl/tree/rados-nkv) | `rados-nkv` | **Host consumer #1.** The `RADOS_NKV` NIXL backend maps `NIXL_WRITE`/`NIXL_READ`/`queryMem` onto KV Store/Retrieve/Exist through the SPDK host shim (the llm-d KV-cache offload transport). |
 | [`rados-nkv-weights`](rados-nkv-weights) | `github.ibm.com/ceph/rados-nkv-weights` | `main` | **Host consumer #2.** A model-weights catalog (publisher + loader) over a shared read-only NVMe-KV namespace, using the same host shim. Content-hash chunk dedup + Arrow per-model manifest. |
 
@@ -73,8 +74,8 @@ git submodule update --init --recursive
 To populate only what you need for a given flow:
 
 ```bash
-# Flow A (GPU-initiated): spdk + rocm-xio + qemu
-git submodule update --init spdk rocm-xio qemu
+# Flow A (GPU-initiated): spdk + rocm-xio + qemu + the guest VM tooling
+git submodule update --init spdk rocm-xio qemu qemu-minimal
 
 # Flow B (host consumers): spdk + nixl + rados-nkv-weights
 git submodule update --init spdk nixl rados-nkv-weights
@@ -102,6 +103,8 @@ make init                # fetch all submodules
 make build               # build everything (build-<component> for just one)
 make vstart              # throwaway Ceph cluster
 make up                  # bring up the SPDK NVMe-KV target
+make vm                  # build the ROCm + rocm-xio guest image (Flow A)
+make vm-run              # launch it (proven pci-mmio-bridge bring-up)
 ```
 
 Build a subset with `make configure CMAKE_ARGS='-DWITH_QEMU=OFF'` then

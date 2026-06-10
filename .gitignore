@@ -1,5 +1,6 @@
 # Local build/scratch — submodules carry their own .gitignore
 /build/
+/vm-images/
 *.swp
 *~
 .DS_Store

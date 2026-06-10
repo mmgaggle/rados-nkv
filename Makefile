@@ -21,6 +21,7 @@ COMPONENTS := ceph spdk rocm-xio qemu nixl weights
 
 # Targets handled by the CMake superbuild, forwarded verbatim as build targets.
 FORWARD := build init vstart stop up down status deps-ceph \
+           vm vm-run vm-run-spdk vm-vfio-rules init-qemu-minimal \
            $(COMPONENTS) \
            $(addprefix build-,$(COMPONENTS)) \
            $(addprefix init-,$(COMPONENTS))
@@ -52,6 +53,10 @@ help:
 	@echo '  make init-<component>     init one submodule'
 	@echo '  make vstart | stop       throwaway Ceph cluster (MON=/OSD=/MGR= override)'
 	@echo '  make up | down | status  SPDK NVMe-KV target (scripts/rados-nkv)'
+	@echo '  make vm                  build the ROCm + rocm-xio guest image'
+	@echo '  make vm-run              launch guest (proven pci-mmio-bridge bring-up)'
+	@echo '  make vm-run-spdk         launch guest wired to the SPDK NVMe-KV target'
+	@echo '  make vm-vfio-rules       install VFIO udev rules (may need sudo)'
 	@echo '  make deps-ceph           install Ceph build deps (may need sudo)'
 	@echo '  make distclean           remove $(BUILD_DIR)/'
 	@echo

@@ -110,8 +110,40 @@ The value buffer must hold `batch-size * value-size` bytes.
 - ⏳ Follow-ups: KV Delete/Exist/List opcodes from the GPU, multi-key manifest
   from a file, per-key value sizes for weight-shard fetch.
 
+## The guest VM (build + launch)
+
+The GPU-side commands above run **inside a guest** with the GPU passed through.
+The [`provisioning/`](../provisioning) layer (built on the
+[`qemu-minimal`](../qemu-minimal) submodule) builds and launches it:
+
+```bash
+make vm                # build the guest image: Ubuntu + ROCm + rocm-xio
+                       # (cloud-init installs ROCm and builds xio-tester in-guest)
+make vm-vfio-rules     # VFIO udev permissions (once; sudo)
+make vm-run            # launch — the proven pci-mmio-bridge bring-up
+```
+
+`make vm-run` runs [`provisioning/launch-bridge-vm.sh`](../provisioning/launch-bridge-vm.sh),
+the exact QEMU invocation that worked (vendored from qemu-xio's
+`run-qemu-pci-mmio-bridge`): `-machine q35,accel=kvm -cpu EPYC`, the GPU via
+`vfio-pci`, the `pci-mmio-bridge` (`shadow-gpa=0x80000000,shadow-size=8192,poll-interval-ns=1000000`),
+and an emulated NVMe (`ioeventfd=off,dbcs=off`, required by the bridge). It uses
+this repo's built `qemu/` (the `pci-mmio-bridge` fork) and `vm-images/ceph-gpu.qcow2`;
+`GPU_BDF`, `IMAGE`, `SSH_PORT`, etc. are env-overridable.
+
+For the **full GPU→SPDK→RADOS** path, attach the SPDK vfio-user NVMe-KV target
+(Step 1) instead of the emulated NVMe:
+
+```bash
+scripts/rados-nkv up                       # -> /var/run/muser/domain/kv/0
+PCI_HOSTDEV=0000:bd:00.0 \
+VFIO_USERDEV=/var/run/muser/domain/kv/0 \
+PCI_MMIO_BRIDGE=on  make vm-run-spdk        # run-vm with the same bridge params
+```
+
 ## Hardware passthrough reference
 
 For the AMD AI Max 395 / Radeon 8060S iGPU passthrough setup that this flow runs
-on, see the `Proxmox_AMD_AI_Max_395_Radeon_8060s_GPU_Passthrough` notes alongside
-this tree (not vendored here).
+on (IOMMU, `vfio-pci` binding, ROM), see the
+`Proxmox_AMD_AI_Max_395_Radeon_8060s_GPU_Passthrough` notes alongside this tree
+(not vendored here) and `make vm-vfio-rules`.
