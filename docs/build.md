@@ -22,15 +22,50 @@ are independent of each other.
    └─────────┘    └──────────┘   └───────────────┘   └──────────┘
 ```
 
-Populate submodules first (see the root `README.md`):
+## Orchestrated build (recommended)
+
+A CMake superbuild ([`CMakeLists.txt`](../CMakeLists.txt)) drives every
+component's native build in the dependency order above, fronted by a top-level
+[`Makefile`](../Makefile):
 
 ```bash
-git submodule update --init --recursive   # or per-component, listed there
+make init      # fetch all submodules (init-<component> for just one)
+make build     # build everything, in order (build-<component> for just one)
 ```
 
-The per-component instructions below are summaries; the authoritative build
-docs live in each submodule (`spdk/README.md`, `rocm-xio/INSTALL.md`,
-`nixl/README.md`, `rados-nkv-weights/README.md`, QEMU's `docs/`).
+Per-component and helper targets:
+
+```bash
+make build-spdk          # one component: ceph spdk rocm-xio qemu nixl weights
+make init-nixl           # init a single submodule
+make vstart   /  stop    # bring a throwaway Ceph cluster up / down
+make up / down / status  # the SPDK NVMe-KV target (wraps scripts/rados-nkv)
+make deps-ceph           # run ceph/install-deps.sh (may need sudo)
+make distclean           # remove build/
+```
+
+Build a subset by toggling components at configure time (then build):
+
+```bash
+make configure CMAKE_ARGS='-DWITH_QEMU=OFF -DWITH_CEPH=OFF'
+make build
+# re-run `make distclean` before changing toggles on an existing build/
+```
+
+Other knobs (CMake cache vars): `JOBS` (parallelism), `SPDK_CONFIGURE_OPTS`
+(default `--with-rbd`), `ROCM_XIO_PRESET` (default `release`), `CEPH_CMAKE_OPTS`.
+`make build` is self-sufficient — each component target depends on its
+`init-<component>`, so a bare `make build` will fetch what it needs — but running
+`make init` first makes the submodule fetch an explicit, separate step.
+
+The rest of this document is the **manual** equivalent: what each `make` target
+runs under the hood, and the authoritative per-component build docs
+(`spdk/README.md`, `rocm-xio/INSTALL.md`, `nixl/README.md`,
+`rados-nkv-weights/README.md`, QEMU's `docs/`). Populate submodules manually with:
+
+```bash
+git submodule update --init --recursive   # or per-component, listed in README.md
+```
 
 ## 0. Ceph — the cluster (optional, for the `rados` backend)
 

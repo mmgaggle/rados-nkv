@@ -91,6 +91,23 @@ git submodule update --init ceph
 > remote; populating it requires access to that host. The other four submodules
 > are public.
 
+## Building
+
+A CMake superbuild ([`CMakeLists.txt`](CMakeLists.txt)) + top-level
+[`Makefile`](Makefile) orchestrate every component's native build in dependency
+order:
+
+```bash
+make init                # fetch all submodules
+make build               # build everything (build-<component> for just one)
+make vstart              # throwaway Ceph cluster
+make up                  # bring up the SPDK NVMe-KV target
+```
+
+Build a subset with `make configure CMAKE_ARGS='-DWITH_QEMU=OFF'` then
+`make build`; `make help` lists every target. Full details — including the
+manual per-component commands — are in [`docs/build.md`](docs/build.md).
+
 ## License
 
 Integration content in this repository (docs, scripts) is Apache-2.0. Each
