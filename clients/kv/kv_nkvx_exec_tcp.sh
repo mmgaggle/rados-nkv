@@ -15,7 +15,7 @@ pool_name="${KV_RADOS_POOL:-kvpool}"
 cluster_name="nkvx_cluster"; kvdev_name="KvNkvxTcp0"
 nqn="nqn.2026-06.io.spdk:kv-nkvx-tcp-cnode0"; nsid=1
 NS=nvmf_e810; TGT_IP=10.110.0.1; TGT_PORT=4420
-WASM_DIR="${SPDK_NKVX_WASM_DIR:-$testdir/wasm}"
+WASM_DIR="${SPDK_NKVX_WASM_DIR:-$testdir/../../rados-nkvx/wasm}"
 
 sock_dir=$(mktemp -d /tmp/kv_nkvx_tcp.XXXXXX)
 rpc_sock="$sock_dir/rpc.sock"; rpc_py="$rootdir/scripts/rpc.py -s $rpc_sock"

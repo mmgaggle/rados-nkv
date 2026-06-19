@@ -47,7 +47,7 @@ TRANSPORT="${1:-na+sm://}"
 CEPH_CONF="${CEPH_CONF:-/home/kyle/src/ceph/build/ceph.conf}"
 RADOS="${RADOS:-/home/kyle/src/ceph/build/bin/rados}"
 KVPOOL="${KVPOOL:-kvpool}"
-WASM_MODULE="$HERE/../clients/kv/wasm/bytecount.wasm"
+WASM_MODULE="$HERE/wasm/bytecount.wasm"
 
 export LD_LIBRARY_PATH="$MERCURY_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 

@@ -25,7 +25,10 @@
 set +e
 
 testdir=$(readlink -f "$(dirname "$0")")
-rootdir=$(readlink -f "$testdir/../../spdk")
+# Front/executor build must be --with-wasm --with-mercury. The umbrella spdk
+# submodule may be a lighter build; KV_NKVX_SPDK_ROOT lets this target a full
+# two-tier build (e.g. the e810-test worktree) without moving the clients.
+rootdir=$(readlink -f "${KV_NKVX_SPDK_ROOT:-$testdir/../../spdk}")
 source "$rootdir/test/common/autotest_common.sh"
 
 : "${CEPH_CONF:=/home/kyle/src/ceph/build/ceph.conf}"; export CEPH_CONF
@@ -75,12 +78,12 @@ make -C "$testdir" >/dev/null 2>&1
 #    (op 12) plus the caps-runaway trio (op 13-15: fuel/walltime/memory) that
 #    kv_host issues and asserts are CONTAINED (ABORTED) by the executor's caps.
 for m in bytecount fuel_runaway walltime_runaway overalloc; do
-	"$rados_bin" -c "$CEPH_CONF" -p "$pool_name" put "wasm:${m}" "$testdir/wasm/${m}.wasm" >/dev/null 2>&1
+	"$rados_bin" -c "$CEPH_CONF" -p "$pool_name" put "wasm:${m}" "$testdir/../../rados-nkvx/wasm/${m}.wasm" >/dev/null 2>&1
 done
-SHA_BC=$(sha256sum "$testdir/wasm/bytecount.wasm" | cut -d' ' -f1)
-SHA_FR=$(sha256sum "$testdir/wasm/fuel_runaway.wasm" | cut -d' ' -f1)
-SHA_WR=$(sha256sum "$testdir/wasm/walltime_runaway.wasm" | cut -d' ' -f1)
-SHA_OA=$(sha256sum "$testdir/wasm/overalloc.wasm" | cut -d' ' -f1)
+SHA_BC=$(sha256sum "$testdir/../../rados-nkvx/wasm/bytecount.wasm" | cut -d' ' -f1)
+SHA_FR=$(sha256sum "$testdir/../../rados-nkvx/wasm/fuel_runaway.wasm" | cut -d' ' -f1)
+SHA_WR=$(sha256sum "$testdir/../../rados-nkvx/wasm/walltime_runaway.wasm" | cut -d' ' -f1)
+SHA_OA=$(sha256sum "$testdir/../../rados-nkvx/wasm/overalloc.wasm" | cut -d' ' -f1)
 
 # 2) Start the standalone EXECUTOR (its own librados, cold path only) and wait for
 #    it to publish its self-address.

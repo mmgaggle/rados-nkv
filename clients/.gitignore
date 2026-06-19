@@ -1,6 +1,5 @@
 # Build outputs — source is committed; binaries/objects are not.
-# (WASM test modules under kv/wasm/*.wasm ARE committed fixtures, so not ignored.
-#  The Rust crate (kv/rados-nkv/.gitignore), vfu_host, and cls have their own.)
+# (The Rust crate (kv/rados-nkv/.gitignore), vfu_host, and cls have their own.)
 *.o
 *.d
 kv/kv_host
