@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
-"""Weights loader — the read path (ADR-0008 / ADR-0009).
+"""Weights loader — the read path.
 
 Given a Model revision and a chosen Precision variant: Retrieve the Weight
 manifest by its deterministic Manifest key, then for each tensor Retrieve its
@@ -172,7 +172,7 @@ def load_arrays(kv: KvClient, model_revision: str, precision: str):
 # ---------------------------------------------------------------------------
 #
 # The real, key-native vLLM loader lives in rados_nkv_weights.vllm_loader: a
-# standalone --load-format=rados-nkv plugin (ADR-0008: "a standalone key-native
+# standalone --load-format=rados-nkv plugin ("a standalone key-native
 # vLLM --load-format plugin, not an extension of Run:ai Model Streamer"). It
 # subclasses vLLM's BaseModelLoader and streams Weight chunks into the model's
 # tensors. That module imports torch/vllm lazily and is NOT imported here, so

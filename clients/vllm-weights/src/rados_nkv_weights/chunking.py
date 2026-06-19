@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
-"""Slice a tensor's bytes into Weight chunks bounded by the value cap (ADR-0009).
+"""Slice a tensor's bytes into Weight chunks bounded by the value cap.
 
 A tensor larger than the librados max value length (64 MiB, see
 :data:`rados_nkv_weights.config.DEFAULT_MAX_VALUE_LEN`) spans multiple Weight

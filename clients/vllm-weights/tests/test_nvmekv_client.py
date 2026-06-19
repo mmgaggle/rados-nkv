@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
-"""Live NVMe-KV transport test for :class:`NvmeKvClient` (ADR-0008).
+"""Live NVMe-KV transport test for :class:`NvmeKvClient`.
 
 Brings up a real SPDK ``nvmf_tgt`` with an in-memory kvdev bound to a KV
 namespace over the VFIOUSER transport (no Ceph, no GPU), then exercises the

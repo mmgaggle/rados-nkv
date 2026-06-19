@@ -2,7 +2,7 @@
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
 """rados_nkv_weights — model-weights catalog over an NVMe-KV-on-RADOS namespace.
 
-Two components, mirroring the read/write split of ADR-0008:
+Two components, mirroring the read/write split:
 
 - **Weights publisher** (write path, :mod:`rados_nkv_weights.publisher`): chunks each
   tensor, Stores each chunk under its content-hash Chunk key (skipping chunks that
@@ -11,7 +11,7 @@ Two components, mirroring the read/write split of ADR-0008:
   Weight manifest by its deterministic Manifest key, then Retrieves each tensor's
   Chunk keys in order and reassembles the tensor.
 
-The on-the-wire layout (Arrow IPC manifest + content-hash chunks) follows ADR-0009.
+The on-the-wire layout (Arrow IPC manifest + content-hash chunks).
 
 The NVMe-KV transport is pluggable via :class:`rados_nkv_weights.kvclient.KvClient`.
 :class:`~rados_nkv_weights.kvclient.InMemoryKvClient` is the dev/test transport;

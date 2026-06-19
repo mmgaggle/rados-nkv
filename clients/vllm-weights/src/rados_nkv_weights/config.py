@@ -2,9 +2,9 @@
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
 """Catalog-wide constants.
 
-These mirror the NVMe-KV / librados backend limits described in ADR-0009 and
-ADR-0002. The defaults are overridable so tests and alternate backends can use
-smaller bounds, but production publishers should keep the librados cap.
+These mirror the NVMe-KV / librados backend limits. The defaults are overridable
+so tests and alternate backends can use smaller bounds, but production publishers
+should keep the librados cap.
 """
 
 #: Length, in bytes, of every NVMe-KV Key used by this catalog.
@@ -18,7 +18,7 @@ KEY_LEN = 16
 
 #: Maximum length, in bytes, of a single NVMe-KV Value (a Weight chunk).
 #:
-#: The librados kvvml backend caps a Value at 64 MiB (ADR-0002). Tensors larger
+#: The librados kvvml backend caps a Value at 64 MiB. Tensors larger
 #: than this span multiple Weight chunks listed in order by the Weight manifest
-#: (ADR-0009). Overridable per call for tests / alternate backends.
+#:. Overridable per call for tests / alternate backends.
 DEFAULT_MAX_VALUE_LEN = 64 * 1024 * 1024

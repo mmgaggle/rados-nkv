@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
-"""ctypes binding for the SPDK in-process NVMe-KV host shim (ADR-0008).
+"""ctypes binding for the SPDK in-process NVMe-KV host shim.
 
 Loads ``libradosnkv_kvshim.so`` (built from ``native/build.sh``, which compiles
 SPDK's ``kv_host_shim.c`` against the SPDK + DPDK static libraries) and declares

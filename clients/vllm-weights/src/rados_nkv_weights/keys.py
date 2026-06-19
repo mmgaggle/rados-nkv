@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
-"""NVMe-KV key derivation for the Weights catalog (ADR-0009).
+"""NVMe-KV key derivation for the Weights catalog.
 
 Two kinds of 16-byte raw keys live in the catalog namespace, kept apart by a
 **structural** 1-byte domain tag that is the first byte of every key:

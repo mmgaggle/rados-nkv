@@ -93,7 +93,7 @@ def test_multi_precision_merges_into_same_manifest(tmp_path):
     m = WeightManifest.from_ipc(kv.retrieve(manifest_key(rev)))
     assert set(m.precisions()) == {"fp16", "int8"}
 
-    # Each precision loads back byte-exact (mixed precision per ADR-0009).
+    # Each precision loads back byte-exact (mixed precision).
     _assert_roundtrip(kv, rev, "fp16", fp16)
     _assert_roundtrip(kv, rev, "int8", int8)
 

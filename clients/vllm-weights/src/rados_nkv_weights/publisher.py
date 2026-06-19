@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
-"""Weights publisher — the write path (ADR-0008 / ADR-0009).
+"""Weights publisher — the write path.
 
 Ingests a model's tensors, splits each into Weight chunks bounded by the value
 cap, Stores each chunk under its content-hash Chunk key — skipping any that
@@ -213,7 +213,7 @@ def publish(
     the whole cap is stored as its own Value (never packed).
 
     Each Value's key is the content hash of *its* bytes, so identical Values
-    dedup via Exist-before-Store (ADR-0009). **Trade-off:** packing reduces
+    dedup via Exist-before-Store. **Trade-off:** packing reduces
     dedup *granularity* — two models that share a tensor but pack it alongside
     different neighbours produce different Values and will not dedup that
     tensor. Pass ``pack=False`` to keep one-Value-per-chunk content addressing
@@ -229,7 +229,7 @@ def publish(
     manifest (re-read, extended, re-Stored) rather than replacing it. This is
     how a catalog accumulates multiple Precision variants of one model — publish
     fp16, then publish fp8 with ``merge=True`` into the same revision and both
-    coexist in one manifest (ADR-0009). Content-hash dedup is independent of the
+    coexist in one manifest. Content-hash dedup is independent of the
     manifest, so identical Values across precisions/calls still Store once.
     Re-publishing a precision that is already recorded for a tensor raises (the
     manifest builder rejects a duplicate precision column for a tensor).
@@ -319,7 +319,7 @@ def publish_safetensors(
     ``merge`` defaults to True so publishing a second precision into an
     already-published ``model_revision`` *adds* its columns to the existing
     manifest rather than clobbering the other precisions (mixed-precision
-    catalog, ADR-0009).
+    catalog).
     """
     from .safetensors_raw import read_tensors
 

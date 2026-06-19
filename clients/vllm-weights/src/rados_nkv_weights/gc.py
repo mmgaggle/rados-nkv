@@ -3,10 +3,10 @@
 """Garbage collection for the Weights catalog: mark-sweep over LIVE manifests.
 
 Content-hash Chunk keys are SHARED across Model revisions / Precision variants /
-models (ADR-0009): identical chunk bytes dedup to one stored Value, so removing
+models: identical chunk bytes dedup to one stored Value, so removing
 a model can NOT naively delete "its" chunks — another live model may reference
 the very same Value. Deletion is therefore deferred and reclaimed by a
-**mark-sweep** over the set of LIVE model revisions (ADR-0009):
+**mark-sweep** over the set of LIVE model revisions:
 
 1. **Mark** — for every live revision, Retrieve+parse its Weight manifest and
    collect ALL referenced Value (Chunk) keys, across every precision and every
@@ -32,7 +32,7 @@ so the operator can fix the live-set and re-run. We never sweep on a possibly
 incomplete live-set.
 
 Runs on a privileged **admin NVMe-KV** connection (Store/Delete permitted); the
-read-only loader handle rejects :meth:`KvClient.delete` (ADR-0008).
+read-only loader handle rejects :meth:`KvClient.delete`.
 """
 
 import argparse

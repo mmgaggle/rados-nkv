@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
-"""The Weight manifest: an Arrow IPC table, one row per tensor (ADR-0009).
+"""The Weight manifest: an Arrow IPC table, one row per tensor.
 
 The manifest is the per-Model-revision self-describing index — the safetensors
 header analog. The Weights loader Retrieves and reads it first, picks a Precision
@@ -256,7 +256,7 @@ class WeightManifest:
         group is **non-null** — i.e. the tensors actually published in that
         Precision variant. This is the set a host materializes when loading that
         precision; tensors lacking it are skipped (selective per-tensor
-        precision, ADR-0009). With ``precision`` omitted, return all tensors.
+        precision). With ``precision`` omitted, return all tensors.
         """
         if precision is None:
             return list(self._rows.keys())

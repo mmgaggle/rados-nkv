@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
-"""The pluggable NVMe-KV transport (ADR-0008).
+"""The pluggable NVMe-KV transport.
 
 The Weights catalog is one shared NVMe-KV namespace. This module defines the
 abstract :class:`KvClient` seam plus an in-memory implementation for dev/tests.
 
-Per ADR-0008 the namespace has an asymmetric read/write split:
+The namespace has an asymmetric read/write split:
 
 - **Weights loader** (read path) attaches the namespace **read-only** and uses
   only :meth:`KvClient.retrieve` / :meth:`KvClient.exists` (NVMe-KV
@@ -66,7 +66,7 @@ class KvClient(abc.ABC):
     def exists(self, key: bytes) -> bool:
         """Return whether ``key`` is present (NVMe-KV ``Exist``).
 
-        Used by the publisher for Exist-before-Store dedup (ADR-0009).
+        Used by the publisher for Exist-before-Store dedup.
         """
 
     @abc.abstractmethod
@@ -75,7 +75,7 @@ class KvClient(abc.ABC):
 
         Production note: like :meth:`store`, only the admin/publisher namespace
         handle may call this; the loader's read-only handle rejects it (the
-        target-side read-only namespace forbids ``Delete`` per ADR-0008). Used
+        target-side read-only namespace forbids ``Delete``). Used
         by garbage collection (:mod:`rados_nkv_weights.gc`) to sweep orphaned
         chunks/manifests. Deleting an absent key is a no-op.
         """
@@ -87,7 +87,7 @@ class KvClient(abc.ABC):
         Used by garbage collection (:mod:`rados_nkv_weights.gc`) to find
         orphaned keys: everything enumerated that is not in the live-set is a
         sweep candidate. NVMe-KV ``List`` is deferred on the librados backend
-        (ADR-0009), so a real client may not be able to provide this over the
+       , so a real client may not be able to provide this over the
         wire — see :meth:`NvmeKvClient.iter_keys` for the production strategy.
         """
 

@@ -5,11 +5,8 @@ immutable model weights to a GPU fleet through *one shared, read-only NVMe-KV
 namespace that acts as a catalog* — no filesystem, no mount, no object-storage
 credentials. A host attaches the namespace and fetches weights by key.
 
-Design source of truth:
-[ADR-0008](https://example.invalid/adr/0008) (distribute weights via a shared,
-read-only KV catalog namespace) and
-[ADR-0009](https://example.invalid/adr/0009) (Arrow per-model manifest +
-content-hash chunks).
+Design summary: distribute weights via a shared, read-only KV catalog namespace,
+addressed by an Arrow per-model manifest + content-hash chunks.
 
 ## Two components
 
@@ -44,7 +41,7 @@ deferred on the librados backend), so discovery is by *deterministic key*.
   safetensors-header analog; a host picks one precision column and loads exactly
   that dtype/quantization. See `manifest.WeightManifest`.
 
-### Read/write split (ADR-0008)
+### Read/write split
 
 The namespace is asymmetric: loaders attach it **read-only** (`Retrieve`/`Exist`
 only; the target rejects `Store`/`Delete`/`Exec`), and the publisher writes via a
@@ -96,7 +93,7 @@ Two concrete implementations ship:
 - `InMemoryKvClient` (dict-backed, for dev/tests; tracks `store_calls` for dedup
   assertions).
 - `nvmekv_client.NvmeKvClient` — the **real NVMe-KV transport** over the SPDK
-  in-process host shim (ADR-0008). It comes in two flavours against the same
+  in-process host shim. It comes in two flavours against the same
   namespace: a **read-only loader** client (`NvmeKvClient.open_loader`, only
   `retrieve`/`exists`) and an **admin publisher** client
   (`NvmeKvClient.open_publisher`, which adds `store`). The `read_only` flag is

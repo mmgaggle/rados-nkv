@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
-"""vLLM ``--load-format`` integration for the Weights catalog (ADR-0008).
+"""vLLM ``--load-format`` integration for the Weights catalog.
 
 This is the real, key-native vLLM model loader: a standalone
-``--load-format=rados-nkv`` plugin (ADR-0008: "a standalone key-native vLLM
+``--load-format=rados-nkv`` plugin ("a standalone key-native vLLM
 ``--load-format`` plugin, not an extension of Run:ai Model Streamer"). Given a
 :class:`~vllm.config.ModelConfig` it derives a Model revision + Precision
 variant, Retrieves the Weight manifest, and streams each tensor's Weight chunks

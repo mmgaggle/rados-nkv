@@ -17,7 +17,7 @@
 #      ... --verify`): every tensor is checked byte-for-byte against the source.
 #
 # The publisher and loader run as SEPARATE processes (one SPDK env per process)
-# against the SAME running target, exercising the ADR-0008 read/write split.
+# against the SAME running target, exercising the read/write split.
 #
 # Everything is env-parameterized (defaults match the dev box) and the whole
 # target lifecycle lives in this one invocation (the target is killed on exit).

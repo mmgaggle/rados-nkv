@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
-"""GC / mark-sweep tests (spdk-9f1, ADR-0009).
+"""GC / mark-sweep tests.
 
 Headline correctness property: a content-hash chunk SHARED across models is
 never swept while ANY referencing model is live — even when another model that

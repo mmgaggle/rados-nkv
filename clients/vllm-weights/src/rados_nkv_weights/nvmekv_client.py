@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026, IBM Corporation. All rights reserved.
-"""Real NVMe-KV transport :class:`KvClient` (ADR-0008).
+"""Real NVMe-KV transport :class:`KvClient`.
 
 :class:`NvmeKvClient` is a concrete :class:`~rados_nkv_weights.kvclient.KvClient`
 that talks to a real NVMe-KV namespace over the SPDK in-process host shim
@@ -8,7 +8,7 @@ that talks to a real NVMe-KV namespace over the SPDK in-process host shim
 :class:`~rados_nkv_weights.kvclient.InMemoryKvClient` with the genuine wire
 transport.
 
-Per ADR-0008 the namespace has an asymmetric read/write split, so this client
+The namespace has an asymmetric read/write split, so this client
 comes in two flavours wrapping the SAME namespace:
 
 - :meth:`open_loader` — a **read-only loader** handle: only
@@ -37,7 +37,7 @@ from ._kvshim import ShimHandle, KV_KEY_DOES_NOT_EXIST
 class ReadOnlyError(PermissionError):
     """A write (:meth:`NvmeKvClient.store`) was attempted on a read-only
     (loader) client. Client-side guard mirroring the target-side read-only
-    namespace (ADR-0008)."""
+    namespace."""
 
 
 class NvmeKvClient(KvClient):
@@ -175,7 +175,7 @@ class NvmeKvClient(KvClient):
                 f"NVMe-KV Delete failed for key {bytes(key).hex()}: rc={rc}")
 
     def iter_keys(self) -> Iterable[bytes]:
-        """NOT available over NVMe-KV: enumeration is deferred (ADR-0009).
+        """NOT available over NVMe-KV: enumeration is deferred.
 
         NVMe-KV ``List`` is not implemented on the librados backend, so a
         loader/publisher handle cannot enumerate the namespace over the wire.
@@ -192,7 +192,7 @@ class NvmeKvClient(KvClient):
         """
         raise NotImplementedError(
             "iter_keys() is unavailable over NVMe-KV: List is deferred on the "
-            "librados backend (ADR-0009). Drive GC enumeration from the "
+            "librados backend. Drive GC enumeration from the "
             "rados-side admin path (`rados ls`) or a maintained catalog index; "
             "see the NvmeKvClient.iter_keys docstring."
         )
