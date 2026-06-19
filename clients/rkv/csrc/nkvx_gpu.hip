@@ -32,7 +32,7 @@
 #include <hip/hip_runtime.h>
 
 extern "C" {
-#include "../../kv/vfu_host/nkv_vfu.h"
+#include "../../nvme-kv/kv/vfu_host/nkv_vfu.h"
 #include "spdk/log.h"
 #include "nkvx_gpu.h"
 }

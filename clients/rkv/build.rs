@@ -2,7 +2,7 @@
 // Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! Build script for rados-nkv (bead spdk-jhk.7.1).
 //!
-//! 1. Compiles csrc/nkvx_shim.c (which includes the modified ../../kv/vfu_host/
+//! 1. Compiles csrc/nkvx_shim.c (which includes the modified ../../nvme-kv/kv/vfu_host/
 //!    nkv_vfu.h driver) via the `cc` crate with the SPDK include paths.
 //! 2. Emits cargo:rustc-link-arg lines reproducing build_gpu.sh's static-lib
 //!    link recipe (lines 23-37) EXACTLY, but WITHOUT -lamdhip64 (no HIP in the
@@ -21,7 +21,7 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/nkvx_shim.h");
     println!("cargo:rerun-if-changed=csrc/nkvx_gpu.hip");
     println!("cargo:rerun-if-changed=csrc/nkvx_gpu.h");
-    println!("cargo:rerun-if-changed=../kv/vfu_host/nkv_vfu.h");
+    println!("cargo:rerun-if-changed=../nvme-kv/kv/vfu_host/nkv_vfu.h");
     println!("cargo:rerun-if-env-changed=NKVX_SPDK_BUILD");
     println!("cargo:rerun-if-env-changed=NKVX_HIPCC");
 
