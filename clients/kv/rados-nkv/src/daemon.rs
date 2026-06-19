@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! Persistent session daemon (bead spdk-jhk.7.11).
 //!
 //! OPT-IN amortization of the per-invocation EAL/attach cost. A short-lived

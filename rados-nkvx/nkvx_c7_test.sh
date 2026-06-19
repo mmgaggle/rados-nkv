@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2026 Intel Corporation. All rights reserved.
+# Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 # Slice C7 live acceptance: large-object bulk RMA on the result path
 # (front-sink / executor-push, design §1.3). The REAL front client core

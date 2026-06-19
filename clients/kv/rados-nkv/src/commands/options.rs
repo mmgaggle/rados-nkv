@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! `-o KEY[=VAL]` option parsing for `store` / `get` (bead spdk-jhk.7.5,
 //! server semantics added in spdk-jhk.7.14).
 //!

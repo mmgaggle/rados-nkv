@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! `~/.rados-nkv.conf` parsing and persistence (bead spdk-jhk.7.2).
 //!
 //! A small hand-rolled INI reader/writer (no external dep) covering the sections

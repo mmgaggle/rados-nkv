@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! `--gpu` delegation to the `nkv_vfu_gpu` binary (bead spdk-jhk.7.7).
 //!
 //! The native GPU-initiated datapath (HIP/ROCm) lives in the separate

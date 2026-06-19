@@ -1,3 +1,6 @@
+/*   SPDX-License-Identifier: BSD-3-Clause
+ *   Copyright (C) 2026 IBM Corporation. All rights reserved.
+ */
 /*
  * Minimal NKVX wasm module: bytecount (TB-WIMP thinnest real-wasm slice).
  *

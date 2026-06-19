@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! Raw `extern "C"` declarations for the nkvx FFI shim (csrc/nkvx_shim.c).
 //!
 //! The shim wraps the proven raw vfio-user NVMe-KV driver (nkv_vfu.h) behind an

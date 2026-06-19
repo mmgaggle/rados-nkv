@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! rados-nkv: ergonomic Rust CLI for the NVMe-KV (rados-nkvx) datapath.
 //!
 //! Foundation (bead spdk-jhk.7.1): FFI to the proven raw vfio-user driver via the

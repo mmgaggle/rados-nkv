@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2026 IBM Corporation. All rights reserved.
+#
 # rados-nkvx Exec over NVMe/TCP on the E810 (port-to-port loopback via netns).
 # Target (root ns) listens on f0 = 10.110.0.1:4420; initiator (netns nvmf_e810,
 # f1 = 10.110.0.2) connects over the physical 100GbE cable. Run under sudo -E.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! Build script for rados-nkv (bead spdk-jhk.7.1).
 //!
 //! 1. Compiles csrc/nkvx_shim.c (which includes the modified ../../vfu_host/

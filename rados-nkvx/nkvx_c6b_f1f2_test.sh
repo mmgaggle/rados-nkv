@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2026 Intel Corporation. All rights reserved.
+# Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 # Bead spdk-8od — dedicated regression guards for the TWO cross-process UAF holes
 # fixed during the C6b review (bead spdk-5ia). These are TEST-ONLY: the protocol

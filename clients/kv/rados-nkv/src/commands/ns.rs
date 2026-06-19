@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! `ns create` and `ns allowlist` — control-plane namespace management over
 //! JSON-RPC (bead spdk-jhk.7.4; create-by-name reworked in spdk-jhk.8.1).
 //!

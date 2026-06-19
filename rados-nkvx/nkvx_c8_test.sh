@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2026 Intel Corporation. All rights reserved.
+# Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 # Slice C8 ACCEPTANCE harness (bead spdk-xmu.8, design §5 rung 2 / §C8): run the
 # full two-tier Exec RPC over the ACCEPTANCE transport — ofi+verbs;ofi_rxm over the

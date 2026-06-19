@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 #  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2026 IBM Corporation. All rights reserved.
 #  Build the GPU-initiated variant (Milestone 2d) with hipcc, linking the SPDK
 #  static libs. The CPU variant (nkv_vfu_host) builds via the normal SPDK
 #  Makefile; only this one needs hipcc + libamdhip64.

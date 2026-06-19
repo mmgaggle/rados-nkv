@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2026 Intel Corporation. All rights reserved.
+# Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 # Slice S2 dma-buf bulk-path acceptance harness (bead spdk-a27): prove the dma-buf
 # result_sink path through OUR Mercury + front + executor stack, end-to-end over

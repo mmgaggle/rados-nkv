@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2026 IBM Corporation. All rights reserved.
+#
 # rados-nkvx Exec over NVMe/RDMA (RoCEv2) on the E810 — confirms the bidirectional
 # Exec fabrics limitation is NOT TCP-specific. Target (root ns) RDMA listener on
 # f0 = 10.110.0.1:4420; initiator (root ns) RDMA-connects via irdma0. Run under sudo -E.

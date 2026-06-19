@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! `list` — list configured namespaces, or enumerate the keys in a namespace
 //! via the target's `nvmf_ns_kv_list` control RPC (bead spdk-jhk.7.13).
 //!

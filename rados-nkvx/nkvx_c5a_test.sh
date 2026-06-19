@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2026 Intel Corporation. All rights reserved.
+# Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 # Slice C5a.1 live acceptance: the standalone rados-nkvx executor cold-fills an
 # object from a REAL RADOS pool (its own librados, cold path only, ADR-0009) and

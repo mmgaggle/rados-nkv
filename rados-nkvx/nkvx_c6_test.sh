@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2026 Intel Corporation. All rights reserved.
+# Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 # Slice C6 / C6a fault-injection + abort acceptance (design §C6/§C6a). Drives the
 # REAL front client core (nkvx_front_client.c, via nkvx_front_client_test) against

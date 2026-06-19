@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! Minimal JSON-RPC 2.0 client over the target's unix socket (bead spdk-jhk.7.4).
 //!
 //! Control-plane ops (`ns create`, `ns allowlist`) talk JSON-RPC to the SPDK

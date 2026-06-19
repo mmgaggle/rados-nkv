@@ -1,3 +1,9 @@
+#  Copyright (C) 2026 IBM, Inc.
+#
+#  This is free software; you can redistribute it and/or modify it under the
+#  terms of the GNU Lesser General Public License version 3, as published by
+#  the Free Software Foundation.  See file COPYING.
+#
 # Superbuild for the ceph-gpu-initiated e2e demo.
 #
 # This does not compile anything itself — it orchestrates each submodule's own

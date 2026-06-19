@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! KV-Exec allowlist policy file (`policy.yaml`) parsing (bead spdk-jhk.7.4).
 //!
 //! The policy file mirrors the JSON-RPC `nvmf_ns_set_kv_exec_allowlist`

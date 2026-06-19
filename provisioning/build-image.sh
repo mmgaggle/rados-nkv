@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+#  Copyright (C) 2026 IBM, Inc.
+#
+#  This is free software; you can redistribute it and/or modify it under the
+#  terms of the GNU Lesser General Public License version 3, as published by
+#  the Free Software Foundation.  See file COPYING.
+#
 #
 # build-image.sh — build the ROCm + rocm-xio guest disk image (cloud-init).
 #

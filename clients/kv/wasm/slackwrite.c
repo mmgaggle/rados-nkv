@@ -1,3 +1,6 @@
+/*   SPDX-License-Identifier: BSD-3-Clause
+ *   Copyright (C) 2026 IBM Corporation. All rights reserved.
+ */
 /*
  * NKVX wasm test module: slackwrite (sandbox-semantics regression, spdk-ii0 D1).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! Subcommand implementations (bead spdk-jhk.7.4 onward).
 //!
 //! The datapath commands (store/get) live in `main.rs` directly for now; the

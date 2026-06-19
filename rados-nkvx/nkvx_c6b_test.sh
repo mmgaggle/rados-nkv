@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2026 Intel Corporation. All rights reserved.
+# Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 # Slice C6b acceptance (bead spdk-5ia, design §C6b): the executor-side do-not-PUSH
 # cross-process cancellation protocol. Where C6a's cancel was ORIGIN-only and could

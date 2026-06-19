@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2026 IBM Corporation. All rights reserved.
+#
 # Bring up the full two-tier rados-nkvx target and LEAVE IT RUNNING.
 # Prints the <traddr> to use with nkv_vfu_gpu. Tear down with nkvx-down.sh.
 #

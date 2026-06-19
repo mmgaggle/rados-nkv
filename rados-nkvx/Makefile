@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2026 Intel Corporation. All rights reserved.
+# Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 # Standalone build for the rados-nkvx executor service skeleton (Slice C2) and
 # its test client. NOT part of the SPDK build graph: the executor is non-SPDK by

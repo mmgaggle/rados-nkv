@@ -1,3 +1,6 @@
+/*   SPDX-License-Identifier: BSD-3-Clause
+ *   Copyright (C) 2026 IBM Corporation. All rights reserved.
+ */
 /*
  * oob.wasm -- adversarial out-of-bounds module for the WASM sandbox-escape
  * regression test (spdk-ii0 B1, ADR-0013). It declares a single 64 KiB page of

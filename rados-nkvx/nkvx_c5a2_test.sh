@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2026 Intel Corporation. All rights reserved.
+# Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 # Slice C5a.2 live acceptance: the standalone rados-nkvx executor runs a REAL
 # wasm module (dlopen'd wasmtime) over an object it cold-fills from RADOS, with

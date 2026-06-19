@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #  SPDX-License-Identifier: BSD-3-Clause
-#  Copyright (C) 2026 Intel Corporation. All rights reserved.
+#  Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 # rados-nkvx TWO-TIER end-to-end (Slice C2/C3/C4/C5a, ADR-0015): a CPU-issued
 # NVMe-KV Exec terminates on the FRONT (nvmf_tgt + kvdev_rados), which forwards it

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! Safe RAII wrapper over the FFI shim (bead spdk-jhk.7.2).
 //!
 //! `spdk_env_init` runs once per process, so the CLI opens ONE [`Session`] per

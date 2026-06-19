@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright (C) 2026 Intel Corporation. All rights reserved.
+# Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 # Slice C2 loopback acceptance: start the standalone nkvx_service executor, wait
 # for it to publish its self-address, forward one nkvx_exec from the stand-in

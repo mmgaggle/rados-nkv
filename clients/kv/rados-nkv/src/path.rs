@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (C) 2026 IBM Corporation. All rights reserved.
 //! `ns/key` path parsing (bead spdk-jhk.7.2).
 //!
 //! A path is `namespace/key`. A bare `namespace` (no slash) parses with
