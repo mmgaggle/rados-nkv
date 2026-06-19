@@ -128,6 +128,19 @@ make -C clients/kv/vfu_host # nkv_vfu_host (raw vfio-user client)
 cargo build --release --manifest-path clients/kv/rados-nkv/Cargo.toml
 ```
 
+## 1c. rados-nkvx — the standalone Exec executor (storage side)
+
+The restartable wasmtime-sandbox executor (`rados-nkvx/`) is **non-SPDK by
+design** (ADR-0009) and links Mercury + librados, not SPDK libs. It reuses the
+Exec RPC contract + wasm core + `wasmtime/include` from the spdk submodule's
+`module/kvdev/rados/` (those stay in the fork — the in-tree `kvdev_rados` module
+compiles them too). Needs the Mercury install from `$SPDK_ROOT/vendor/`.
+
+```bash
+make -C rados-nkvx                              # nkvx_service, nkvx_exec_client
+# overrides: SPDK_ROOT=<spdk>  MERCURY_PREFIX=<mercury>  ASAN=1
+```
+
 ## 2. rocm-xio — Flow A (GPU-initiated)
 
 Needs ROCm/HIP and a supported AMD GPU (gfx1151). See `rocm-xio/INSTALL.md` for
