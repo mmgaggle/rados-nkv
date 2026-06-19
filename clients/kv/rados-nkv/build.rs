@@ -210,6 +210,12 @@ fn main() {
     // -lpthread (plan: trailing -lpthread; -pthread already covers it but keep
     // explicit to match the plan's stated tail).
     arg("-lpthread");
+
+    // libc LAST: rustc links with -nodefaultlibs, so libc is not auto-appended
+    // after these whole-archive DPDK static libs. librte_telemetry.a references
+    // glibc's atexit, which the linker only resolves if libc follows the DPDK
+    // archives on the command line.
+    arg("-lc");
 }
 
 /// Locate the directory holding libamdhip64 for the gpu-native link. Honors
