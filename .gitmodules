@@ -1,7 +1,7 @@
 [submodule "spdk"]
 	path = spdk
 	url = https://github.com/mmgaggle/spdk.git
-	branch = rados-nkv
+	branch = devel
 [submodule "rocm-xio"]
 	path = rocm-xio
 	url = https://github.com/mmgaggle/rocm-xio.git
