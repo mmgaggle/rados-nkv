@@ -2,7 +2,7 @@
 #  Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 
-SPDK_ROOT_DIR := $(abspath $(CURDIR)/../../spdk)
+SPDK_ROOT_DIR := $(abspath $(CURDIR)/../../../spdk)
 
 APP = kv_shim_test
 

@@ -16,7 +16,7 @@
 # and an SPDK build configured --with-rbd --with-vfio-user.
 
 testdir=$(readlink -f $(dirname $0))
-rootdir=$(readlink -f $testdir/../../spdk)
+rootdir=$(readlink -f $testdir/../../../spdk)
 source $rootdir/test/common/autotest_common.sh
 
 : "${CEPH_CONF:=/mnt/ceph/build/ceph.conf}"

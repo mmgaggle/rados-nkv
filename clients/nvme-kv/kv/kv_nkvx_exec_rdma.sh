@@ -7,14 +7,14 @@
 # f0 = 10.110.0.1:4420; initiator (root ns) RDMA-connects via irdma0. Run under sudo -E.
 set +e
 testdir=$(readlink -f "$(dirname "$0")")
-rootdir=$(readlink -f "$testdir/../../spdk")
+rootdir=$(readlink -f "$testdir/../../../spdk")
 source "$rootdir/test/common/autotest_common.sh"
 : "${CEPH_CONF:=/home/kyle/src/ceph/build/ceph.conf}"; export CEPH_CONF
 pool_name="${KV_RADOS_POOL:-kvpool}"
 cluster_name="nkvx_cluster"; kvdev_name="KvNkvxRdma0"
 nqn="nqn.2026-06.io.spdk:kv-nkvx-rdma-cnode0"; nsid=1
 TGT_IP=10.110.0.1; TGT_PORT=4420
-WASM_DIR="${SPDK_NKVX_WASM_DIR:-$testdir/../../rados-nkvx/wasm}"
+WASM_DIR="${SPDK_NKVX_WASM_DIR:-$testdir/../../../rados-nkvx/wasm}"
 sock_dir=$(mktemp -d /tmp/kv_nkvx_rdma.XXXXXX)
 rpc_sock="$sock_dir/rpc.sock"; rpc_py="$rootdir/scripts/rpc.py -s $rpc_sock"
 

@@ -2,7 +2,7 @@
 # (The Rust crate (rkv/.gitignore), vfu_host, and cls have their own.)
 *.o
 *.d
-kv/kv_host
-kv/kv_ro_host
-kv_rados/kv_rados_host
-kv_shim/kv_shim_test
+nvme-kv/kv/kv_host
+nvme-kv/kv/kv_ro_host
+nvme-kv/kv_rados/kv_rados_host
+nvme-kv/kv_shim/kv_shim_test

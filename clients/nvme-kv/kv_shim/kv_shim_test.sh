@@ -10,7 +10,7 @@
 # path and greps for the PASS line.
 
 testdir=$(readlink -f $(dirname $0))
-rootdir=$(readlink -f $testdir/../../spdk)
+rootdir=$(readlink -f $testdir/../../../spdk)
 source $rootdir/test/common/autotest_common.sh
 
 nqn="nqn.2026-06.io.spdk:kv-shim-cnode0"

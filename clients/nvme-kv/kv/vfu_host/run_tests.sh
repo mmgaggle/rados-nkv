@@ -11,7 +11,7 @@
 # Usage: run_tests.sh        (builds the GPU client if needed, then runs)
 set +e
 HERE=$(readlink -f "$(dirname "$0")")
-WT=$(readlink -f "$HERE/../../../spdk")
+WT=$(readlink -f "$HERE/../../../../spdk")
 CEPH=${CEPH_ROOT:-/home/kyle/src/ceph}
 GPU="$HERE/nkv_vfu_gpu"
 RADOS() { LD_LIBRARY_PATH="$CEPH/build/lib" "$CEPH/build/bin/rados" -c "$CEPH/build/ceph.conf" -p kvpool "$@"; }

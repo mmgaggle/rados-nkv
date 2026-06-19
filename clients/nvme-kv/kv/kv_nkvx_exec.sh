@@ -32,7 +32,7 @@
 # /usr/local/lib (the executor probes that path) or put it on LD_LIBRARY_PATH.
 
 testdir=$(readlink -f $(dirname $0))
-rootdir=$(readlink -f $testdir/../../spdk)
+rootdir=$(readlink -f $testdir/../../../spdk)
 source $rootdir/test/common/autotest_common.sh
 
 : "${CEPH_CONF:=/mnt/ceph/build/ceph.conf}"
@@ -74,7 +74,7 @@ make -C "$testdir" > /dev/null
 
 # Directory holding precompiled <name>.wasm modules for the real-wasm Exec path
 # (op_id 12). The executor reads SPDK_NKVX_WASM_DIR to locate "bytecount.wasm".
-export SPDK_NKVX_WASM_DIR="$testdir/../../rados-nkvx/wasm"
+export SPDK_NKVX_WASM_DIR="$testdir/../../../rados-nkvx/wasm"
 
 # Start the target. Capture its log so we can grep the deterministic off-reactor
 # proof (reactor_tid vs worker run_tid) the executor emits for each Exec. The
@@ -116,7 +116,7 @@ $rpc_py nvmf_subsystem_add_listener "$nqn" -t VFIOUSER -a "$muser_dir" -s 0
 # Upload the wasm module objects to RADOS (object name == module_key "wasm:<name>"
 # so the executor routes it to the real wasmtime runtime, not a built-in).
 for m in bytecount fuel_runaway walltime_runaway overalloc; do
-	"$rados_bin" -c "$CEPH_CONF" -p "$pool_name" put "wasm:${m}" "$testdir/../../rados-nkvx/wasm/${m}.wasm"
+	"$rados_bin" -c "$CEPH_CONF" -p "$pool_name" put "wasm:${m}" "$testdir/../../../rados-nkvx/wasm/${m}.wasm"
 done
 
 # Built-ins via the legacy shorthand; their decode is asserted via get-allowlist.
@@ -125,10 +125,10 @@ $rpc_py nvmf_ns_set_kv_exec_allowlist "$nqn" "$nsid" "10:nkvx:bytecount 11:nkvx:
 # Real-wasm structured bindings (runtime=wasm + sha256 + locator). The CLI only
 # emits the legacy {op_id,binding} form, so the structured entries are merged in
 # via a direct RPC call that re-sets the full allowlist (built-ins + wasm).
-SHA_BC=$(sha256sum "$testdir/../../rados-nkvx/wasm/bytecount.wasm" | cut -d' ' -f1)
-SHA_FR=$(sha256sum "$testdir/../../rados-nkvx/wasm/fuel_runaway.wasm" | cut -d' ' -f1)
-SHA_WR=$(sha256sum "$testdir/../../rados-nkvx/wasm/walltime_runaway.wasm" | cut -d' ' -f1)
-SHA_OA=$(sha256sum "$testdir/../../rados-nkvx/wasm/overalloc.wasm" | cut -d' ' -f1)
+SHA_BC=$(sha256sum "$testdir/../../../rados-nkvx/wasm/bytecount.wasm" | cut -d' ' -f1)
+SHA_FR=$(sha256sum "$testdir/../../../rados-nkvx/wasm/fuel_runaway.wasm" | cut -d' ' -f1)
+SHA_WR=$(sha256sum "$testdir/../../../rados-nkvx/wasm/walltime_runaway.wasm" | cut -d' ' -f1)
+SHA_OA=$(sha256sum "$testdir/../../../rados-nkvx/wasm/overalloc.wasm" | cut -d' ' -f1)
 PYTHONPATH="$rootdir/python" python3 - "$rpc_sock" "$nqn" "$nsid" "$pool_name" \
 	"$SHA_BC" "$SHA_FR" "$SHA_WR" "$SHA_OA" <<'PY'
 import sys

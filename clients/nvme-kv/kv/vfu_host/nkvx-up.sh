@@ -10,7 +10,7 @@
 #   cd /home/kyle/src/ceph/build && MON=1 OSD=3 ../src/vstart.sh --without-dashboard   # reuse
 set -euo pipefail
 HERE=$(readlink -f "$(dirname "$0")")
-WT=$(readlink -f "$HERE/../../../spdk")   # spdk submodule of the umbrella repo
+WT=$(readlink -f "$HERE/../../../../spdk")   # spdk submodule of the umbrella repo
 CEPH=${CEPH_ROOT:-/home/kyle/src/ceph}
 CEPH_LIB=$CEPH/build/lib; CEPH_CONF=$CEPH/build/ceph.conf
 MERCURY=$WT/vendor/mercury-install

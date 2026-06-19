@@ -19,7 +19,7 @@
 set -e
 
 testdir=$(readlink -f "$(dirname "$0")")
-rootdir=$(readlink -f "$testdir/../../spdk")
+rootdir=$(readlink -f "$testdir/../../../spdk")
 
 : "${CEPH_CONF:?set CEPH_CONF to the ceph.conf path}"
 : "${CEPH_KEYRING:?set CEPH_KEYRING to the keyring path}"

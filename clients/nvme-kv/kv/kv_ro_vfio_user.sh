@@ -16,7 +16,7 @@
 # kvdev bound *without* --read-only still accepts a KV Store via the kv_host app.
 
 testdir=$(readlink -f $(dirname $0))
-rootdir=$(readlink -f $testdir/../../spdk)
+rootdir=$(readlink -f $testdir/../../../spdk)
 source $rootdir/test/common/autotest_common.sh
 
 nqn_ro="nqn.2026-06.io.spdk:kv-ro-cnode0"

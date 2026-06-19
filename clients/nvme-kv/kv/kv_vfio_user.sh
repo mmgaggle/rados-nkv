@@ -11,7 +11,7 @@
 # Retrieve, verifying the bytes round-trip.
 
 testdir=$(readlink -f $(dirname $0))
-rootdir=$(readlink -f $testdir/../../spdk)
+rootdir=$(readlink -f $testdir/../../../spdk)
 source $rootdir/test/common/autotest_common.sh
 
 nqn="nqn.2026-06.io.spdk:kv-cnode0"

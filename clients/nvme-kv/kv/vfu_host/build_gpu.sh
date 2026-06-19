@@ -7,7 +7,7 @@
 set -euo pipefail
 
 HERE=$(readlink -f "$(dirname "$0")")    # this vfu_host dir (the Makefile lives here)
-WT=$(readlink -f "$HERE/../../../spdk")  # spdk submodule of the umbrella repo
+WT=$(readlink -f "$HERE/../../../../spdk")  # spdk submodule of the umbrella repo
 
 # Ensure the SPDK libs + CPU variant are built (gives us the link inputs).
 make -C "$HERE" >/dev/null

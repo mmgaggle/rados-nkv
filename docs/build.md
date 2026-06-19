@@ -118,10 +118,10 @@ CLI (`clients/rkv`), and the vfio-user host live in `clients/` and build
 `SPDK_ROOT_DIR := $(CURDIR)/../../spdk`). Build SPDK first, then:
 
 ```bash
-make -C clients/kv_shim     # kv_shim_test (+ libfied kv_host_shim)
-make -C clients/kv          # kv_host, kv_ro_host
-make -C clients/kv_rados    # kv_rados_host
-make -C clients/kv/vfu_host # nkv_vfu_host (raw vfio-user client)
+make -C clients/nvme-kv/kv_shim     # kv_shim_test (+ libfied kv_host_shim)
+make -C clients/nvme-kv/kv          # kv_host, kv_ro_host
+make -C clients/nvme-kv/kv_rados    # kv_rados_host
+make -C clients/nvme-kv/kv/vfu_host # nkv_vfu_host (raw vfio-user client)
 
 # Rust CLI (CPU default; gpu-native feature pulls in hipcc/ROCm). Defaults to the
 # spdk submodule build; override with NKVX_SPDK_BUILD=<spdk>/build.
@@ -177,7 +177,7 @@ Point the build at the SPDK tree from step 1:
 cd clients/nixl
 meson setup build \
     -Dspdk_root=$PWD/../../spdk \
-    -Dspdk_kv_shim_dir=$PWD/../kv_shim \
+    -Dspdk_kv_shim_dir=$PWD/../nvme-kv/kv_shim \
     -Drados_nkv_build_test=true
 ninja -C build
 ninja -C build test               # unit suite incl. key-derivation tests
@@ -197,8 +197,8 @@ pip install pyarrow numpy && pip install -e .
 python -m pytest tests/ -v        # exercises the in-memory client
 
 # Native transport against the real target (optional):
-# NOTE: kv_host_shim moved to clients/kv_shim; native/build.sh must locate the
-# shim there (e.g. KV_SHIM_DIR=$PWD/../kv_shim) — see the weights repo.
+# NOTE: kv_host_shim moved to clients/nvme-kv/kv_shim; native/build.sh must locate the
+# shim there (e.g. KV_SHIM_DIR=$PWD/../nvme-kv/kv_shim) — see the weights repo.
 SPDK_ROOT=$PWD/../../spdk ./native/build.sh   # -> native/libradosnkv_kvshim.so
 ```
 

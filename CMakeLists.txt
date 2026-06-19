@@ -119,18 +119,18 @@ if(WITH_SPDK)
 endif()
 
 # ---- clients: KV host/test harness — builds against the spdk submodule ------
-# In-repo (not a submodule), so no init target. The Makefiles default
-# SPDK_ROOT_DIR to ../../spdk and the Rust crate defaults NKVX_SPDK_BUILD to
-# ../../../spdk/build, so they build once spdk is built. gpu-native (hipcc/ROCm)
+# In-repo (not a submodule), so no init target. The nvme-kv/ Makefiles point
+# SPDK_ROOT_DIR at the umbrella's spdk and the Rust crate defaults NKVX_SPDK_BUILD
+# to ../../spdk/build, so they build once spdk is built. gpu-native (hipcc/ROCm)
 # is off by default — the superbuild builds the CPU clients only.
 if(WITH_CLIENTS AND WITH_SPDK)
   ExternalProject_Add(clients
     SOURCE_DIR "${REPO}/clients"
     CONFIGURE_COMMAND ${CMAKE_COMMAND} -E true
-    BUILD_COMMAND     make -C kv_shim -j${JOBS}
-          COMMAND     make -C kv -j${JOBS}
-          COMMAND     make -C kv_rados -j${JOBS}
-          COMMAND     make -C kv/vfu_host -j${JOBS}
+    BUILD_COMMAND     make -C nvme-kv/kv_shim -j${JOBS}
+          COMMAND     make -C nvme-kv/kv -j${JOBS}
+          COMMAND     make -C nvme-kv/kv_rados -j${JOBS}
+          COMMAND     make -C nvme-kv/kv/vfu_host -j${JOBS}
           COMMAND     cargo build --release --manifest-path rkv/Cargo.toml
     DEPENDS spdk
     ${EP_COMMON})
@@ -197,7 +197,7 @@ if(WITH_NIXL)
     SOURCE_DIR "${REPO}/clients/nixl"
     CONFIGURE_COMMAND meson setup build
               -Dspdk_root=${REPO}/spdk
-              -Dspdk_kv_shim_dir=${REPO}/clients/kv_shim
+              -Dspdk_kv_shim_dir=${REPO}/clients/nvme-kv/kv_shim
               -Drados_nkv_build_test=true
     BUILD_COMMAND ninja -C build
     DEPENDS ${_nixl_deps}

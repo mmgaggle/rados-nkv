@@ -2,7 +2,7 @@
 #  Copyright (C) 2026 IBM Corporation. All rights reserved.
 #
 
-SPDK_ROOT_DIR := $(abspath $(CURDIR)/../../spdk)
+SPDK_ROOT_DIR := $(abspath $(CURDIR)/../../../spdk)
 
 # This directory builds more than one standalone KV host: kv_host (round-trip /
 # KV Exec / List tests) and kv_ro_host (read-only namespace enforcement test,
