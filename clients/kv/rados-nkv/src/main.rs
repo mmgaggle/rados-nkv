@@ -48,7 +48,7 @@ use path::KvPath;
 use proto::{Request, Response};
 
 #[derive(Parser)]
-#[command(name = "rados-nkv", about = "Ergonomic CLI for the NVMe-KV datapath")]
+#[command(name = "rkv", about = "Ergonomic CLI for the NVMe-KV datapath")]
 struct Cli {
     /// Route store/get/exec through the GPU-initiated datapath (nkv_vfu_gpu
     /// subprocess) instead of the in-process CPU datapath. `get` issues N

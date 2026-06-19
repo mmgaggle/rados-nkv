@@ -6,7 +6,9 @@ description = "Ergonomic Rust CLI for the NVMe-KV (rados-nkvx) datapath over vfi
 license = "BSD-3-Clause"
 
 [[bin]]
-name = "rados-nkv"
+# Short, typeable binary name; the crate/package stays `rados-nkv` (distinct
+# from Mozilla's `rkv` crate on crates.io).
+name = "rkv"
 path = "src/main.rs"
 
 [features]
