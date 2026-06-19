@@ -6,7 +6,7 @@
  * FFI shim implementation for the rados-nkv Rust CLI (bead spdk-jhk.7.1).
  *
  * Includes the modified driver header directly (the nsid-threaded copy in
- * ../../vfu_host/nkv_vfu.h) and provides the CPU nvfu_produce() that the header
+ * ../../kv/vfu_host/nkv_vfu.h) and provides the CPU nvfu_produce() that the header
  * declares but does not define -- copied verbatim from nkv_vfu_host.c so the CLI
  * drives the datapath from the CPU (the GPU path is a separate, flagged route).
  *
@@ -16,7 +16,7 @@
 
 #include "nkvx_shim.h"
 
-#include "../../vfu_host/nkv_vfu.h"
+#include "../../kv/vfu_host/nkv_vfu.h"
 
 #include "spdk/log.h"
 

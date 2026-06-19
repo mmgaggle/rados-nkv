@@ -113,7 +113,7 @@ step 1b), no longer inside the SPDK tree.
 ## 1b. clients — KV host/test harness (Flow B substrate)
 
 The standalone NVMe-KV hosts, the reusable `kv_host_shim`, the `rados-nkv` Rust
-CLI, the vfio-user host, and the WASM Exec modules live in `clients/` and build
+CLI (`clients/rkv`), and the vfio-user host live in `clients/` and build
 **against the spdk submodule from step 1** (their Makefiles set
 `SPDK_ROOT_DIR := $(CURDIR)/../../spdk`). Build SPDK first, then:
 
@@ -125,7 +125,7 @@ make -C clients/kv/vfu_host # nkv_vfu_host (raw vfio-user client)
 
 # Rust CLI (CPU default; gpu-native feature pulls in hipcc/ROCm). Defaults to the
 # spdk submodule build; override with NKVX_SPDK_BUILD=<spdk>/build.
-cargo build --release --manifest-path clients/kv/rados-nkv/Cargo.toml
+cargo build --release --manifest-path clients/rkv/Cargo.toml
 ```
 
 ## 1c. rados-nkvx — the standalone Exec executor (storage side)

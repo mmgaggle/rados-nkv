@@ -131,7 +131,7 @@ if(WITH_CLIENTS AND WITH_SPDK)
           COMMAND     make -C kv -j${JOBS}
           COMMAND     make -C kv_rados -j${JOBS}
           COMMAND     make -C kv/vfu_host -j${JOBS}
-          COMMAND     cargo build --release --manifest-path kv/rados-nkv/Cargo.toml
+          COMMAND     cargo build --release --manifest-path rkv/Cargo.toml
     DEPENDS spdk
     ${EP_COMMON})
   add_build_alias(clients)
