@@ -11,7 +11,7 @@
 	url = https://github.com/mmgaggle/nixl.git
 	branch = rados-nkv
 [submodule "qemu"]
-	path = qemu
+	path = clients/vm/qemu
 	url = https://github.com/sbates130272/qemu.git
 	branch = dev/stephen/pci-mmio-bridge-submit
 [submodule "ceph"]
@@ -19,6 +19,6 @@
 	url = https://github.com/ceph/ceph.git
 	branch = tentacle
 [submodule "qemu-minimal"]
-	path = qemu-minimal
+	path = clients/vm/qemu-minimal
 	url = https://github.com/sbates130272/qemu-minimal.git
 	branch = main

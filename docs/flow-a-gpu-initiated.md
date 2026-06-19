@@ -113,7 +113,7 @@ The value buffer must hold `batch-size * value-size` bytes.
 ## The guest VM (build + launch)
 
 The GPU-side commands above run **inside a guest** with the GPU passed through.
-The [`provisioning/`](../provisioning) layer (built on the
+The [`provisioning/`](../clients/vm/provisioning) layer (built on the
 [`qemu-minimal`](../qemu-minimal) submodule) builds and launches it:
 
 ```bash
@@ -123,7 +123,7 @@ make vm-vfio-rules     # VFIO udev permissions (once; sudo)
 make vm-run            # launch — the proven pci-mmio-bridge bring-up
 ```
 
-`make vm-run` runs [`provisioning/launch-bridge-vm.sh`](../provisioning/launch-bridge-vm.sh),
+`make vm-run` runs [`provisioning/launch-bridge-vm.sh`](../clients/vm/provisioning/launch-bridge-vm.sh),
 the exact QEMU invocation that worked (vendored from qemu-xio's
 `run-qemu-pci-mmio-bridge`): `-machine q35,accel=kvm -cpu EPYC`, the GPU via
 `vfio-pci`, the `pci-mmio-bridge` (`shadow-gpa=0x80000000,shadow-size=8192,poll-interval-ns=1000000`),

@@ -57,8 +57,8 @@ executor, the KV client/test harnesses, and the documentation.
 | [`spdk`](spdk) | [`mmgaggle/spdk`](https://github.com/mmgaggle/spdk/tree/devel) | `devel` | **The substrate.** NVMe-KV command set, the `kvdev` device layer with `mem` and `rados` (librados) backends, the NVMf KV controller (`ctrlr_kvdev`, CSI=KV namespaces, read-only & Exec gates), and the in-process **KV host shim**. |
 | [`ceph`](ceph) | [`ceph/ceph`](https://github.com/ceph/ceph/tree/tentacle) | `tentacle` | **The storage cluster.** `vstart` a throwaway RADOS cluster for e2e, and provide the `librados` the `rados` kvdev backend links. |
 | [`rocm-xio`](clients/rocm-xio) | [`mmgaggle/rocm-xio`](https://github.com/mmgaggle/rocm-xio/tree/nvme-kv) | `nvme-kv` | **GPU-initiated path.** `nvme-ep --kv-op` — GPU `__device__` code builds the KV SQE, rings the doorbell, polls the CQ; the value lands in host RAM or VRAM. |
-| [`qemu`](qemu) | [`sbates130272/qemu`](https://github.com/sbates130272/qemu) | `dev/stephen/pci-mmio-bridge-submit` | **GPU↔NVMe bridge.** The `pci-mmio-bridge` device forwards the GPU's doorbell MMIO to the SPDK NVMe BAR. |
-| [`qemu-minimal`](qemu-minimal) | [`sbates130272/qemu-minimal`](https://github.com/sbates130272/qemu-minimal) | `main` | **Guest VM tooling.** Cloud-init VM creation + a launcher with GPU `vfio-pci` passthrough, libvfio-user sockets, and the bridge device. |
+| [`qemu`](clients/vm/qemu) | [`sbates130272/qemu`](https://github.com/sbates130272/qemu) | `dev/stephen/pci-mmio-bridge-submit` | **GPU↔NVMe bridge.** The `pci-mmio-bridge` device forwards the GPU's doorbell MMIO to the SPDK NVMe BAR. |
+| [`qemu-minimal`](clients/vm/qemu-minimal) | [`sbates130272/qemu-minimal`](https://github.com/sbates130272/qemu-minimal) | `main` | **Guest VM tooling.** Cloud-init VM creation + a launcher with GPU `vfio-pci` passthrough, libvfio-user sockets, and the bridge device. |
 | [`nixl`](clients/nixl) | [`mmgaggle/nixl`](https://github.com/mmgaggle/nixl/tree/rados-nkv) | `rados-nkv` | **Host consumer.** The `RADOS_NKV` NIXL backend maps `NIXL_WRITE`/`READ`/`queryMem` onto KV Store/Retrieve/Exist. |
 
 ## Documentation
@@ -85,7 +85,7 @@ cd rados-nkv
 git submodule update --init --recursive          # everything (pulls several GB)
 
 # or, per flow:
-git submodule update --init spdk clients/rocm-xio qemu qemu-minimal   # Flow A (GPU-initiated)
+git submodule update --init spdk clients/rocm-xio clients/vm/qemu clients/vm/qemu-minimal   # Flow A (GPU-initiated)
 git submodule update --init spdk clients/nixl                         # Flow B (host consumers)
 git submodule update --init ceph                              # real RADOS backend (either flow)
 ```

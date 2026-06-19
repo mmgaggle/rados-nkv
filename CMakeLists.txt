@@ -174,9 +174,9 @@ endif()
 
 # ---- qemu: pci-mmio-bridge (Flow A) ----------------------------------------
 if(WITH_QEMU)
-  add_init(qemu qemu)
+  add_init(qemu clients/vm/qemu)
   ExternalProject_Add(qemu
-    SOURCE_DIR "${REPO}/qemu"
+    SOURCE_DIR "${REPO}/clients/vm/qemu"
     CONFIGURE_COMMAND ./configure --target-list=x86_64-softmmu --enable-kvm
     BUILD_COMMAND make -j${JOBS}
     DEPENDS init-qemu
@@ -227,7 +227,7 @@ endif()
 
 # ---- qemu-minimal: guest VM tooling (no compile; scripts only) -------------
 if(WITH_QEMU_MINIMAL)
-  add_init(qemu-minimal qemu-minimal)
+  add_init(qemu-minimal clients/vm/qemu-minimal)
   list(APPEND INIT_TARGETS init-qemu-minimal)
 endif()
 
@@ -279,24 +279,24 @@ add_custom_target(status
 
 # ---- guest VM (Flow A): build the image, launch it -------------------------
 add_custom_target(vm
-  COMMAND "${REPO}/provisioning/build-image.sh"
+  COMMAND "${REPO}/clients/vm/provisioning/build-image.sh"
   USES_TERMINAL
   COMMENT "build the ROCm + rocm-xio guest image (cloud-init)")
 
 # Proven bring-up: GPU passthrough + pci-mmio-bridge + emulated NVMe.
 add_custom_target(vm-run
-  COMMAND "${REPO}/provisioning/launch-bridge-vm.sh"
+  COMMAND "${REPO}/clients/vm/provisioning/launch-bridge-vm.sh"
   USES_TERMINAL
   COMMENT "launch the guest (vendored run-qemu-pci-mmio-bridge)")
 
 # Full GPU->SPDK->RADOS path: qemu-minimal run-vm with the SPDK vfio-user NVMe-KV
 # controller (set VFIO_USERDEV / PCI_HOSTDEV / PCI_MMIO_BRIDGE in the env).
 add_custom_target(vm-run-spdk
-  COMMAND "${REPO}/provisioning/run-guest.sh"
+  COMMAND "${REPO}/clients/vm/provisioning/run-guest.sh"
   USES_TERMINAL
   COMMENT "launch the guest wired to the SPDK NVMe-KV target (run-vm)")
 
 add_custom_target(vm-vfio-rules
-  COMMAND "${REPO}/qemu-minimal/udev/install-vfio-rules"
+  COMMAND "${REPO}/clients/vm/qemu-minimal/udev/install-vfio-rules"
   USES_TERMINAL
   COMMENT "install qemu-minimal's VFIO udev rules (may require sudo)")

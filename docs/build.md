@@ -161,7 +161,7 @@ Build the `pci-mmio-bridge` QEMU from the
 `dev/stephen/pci-mmio-bridge-submit` branch:
 
 ```bash
-cd qemu
+cd clients/vm/qemu
 ./configure --target-list=x86_64-softmmu --enable-kvm
 make -j"$(nproc)"
 ```
