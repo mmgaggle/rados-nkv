@@ -44,13 +44,13 @@ as KV because the **namespace CSI is Key Value (0x1)**.
 
 Status `0x87` = key does not exist (reported, not fatal); `0x86` = invalid key
 size; `0x85` = invalid value size. Full detail in
-[`rocm-xio/docs/nvme-kv.md`](../rocm-xio/docs/nvme-kv.md).
+[`rocm-xio/docs/nvme-kv.md`](../clients/rocm-xio/docs/nvme-kv.md).
 
 ## Running it
 
 > Requires the `spdk`, `rocm-xio`, and `qemu` submodules populated and built —
 > see [`build.md`](build.md). The bundled
-> [`rocm-xio/examples/stage2_kv_rados_gpu.sh`](../rocm-xio/examples/stage2_kv_rados_gpu.sh)
+> [`rocm-xio/examples/stage2_kv_rados_gpu.sh`](../clients/rocm-xio/examples/stage2_kv_rados_gpu.sh)
 > is the reference harness; the steps below are its shape.
 
 ### 1. Stand up the SPDK NVMe-KV-on-RADOS target

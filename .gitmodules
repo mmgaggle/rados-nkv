@@ -3,7 +3,7 @@
 	url = https://github.com/mmgaggle/spdk.git
 	branch = devel
 [submodule "rocm-xio"]
-	path = rocm-xio
+	path = clients/rocm-xio
 	url = https://github.com/mmgaggle/rocm-xio.git
 	branch = nvme-kv
 [submodule "nixl"]

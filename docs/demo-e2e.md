@@ -83,7 +83,7 @@ rados -p kvpool -N kvns stat $(printf 'gpukey01' | xxd -p)
 ```
 
 See [`flow-a-gpu-initiated.md`](flow-a-gpu-initiated.md) and the bundled
-[`rocm-xio/examples/stage2_kv_rados_gpu.sh`](../rocm-xio/examples/stage2_kv_rados_gpu.sh).
+[`rocm-xio/examples/stage2_kv_rados_gpu.sh`](../clients/rocm-xio/examples/stage2_kv_rados_gpu.sh).
 
 ## Step 3 — Flow B: NIXL round-trip over the same target
 

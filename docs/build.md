@@ -64,7 +64,7 @@ Other knobs (CMake cache vars): `JOBS` (parallelism), `SPDK_CONFIGURE_OPTS`
 
 The rest of this document is the **manual** equivalent: what each `make` target
 runs under the hood, and the authoritative per-component build docs
-(`spdk/README.md`, `rocm-xio/INSTALL.md`, `nixl/README.md`,
+(`spdk/README.md`, `clients/rocm-xio/INSTALL.md`, `nixl/README.md`,
 `rados-nkv-weights/README.md`, QEMU's `docs/`). Populate submodules manually with:
 
 ```bash
@@ -143,11 +143,11 @@ make -C rados-nkvx                              # nkvx_service, nkvx_exec_client
 
 ## 2. rocm-xio — Flow A (GPU-initiated)
 
-Needs ROCm/HIP and a supported AMD GPU (gfx1151). See `rocm-xio/INSTALL.md` for
+Needs ROCm/HIP and a supported AMD GPU (gfx1151). See `clients/rocm-xio/INSTALL.md` for
 dependencies and supported hardware.
 
 ```bash
-cd rocm-xio
+cd clients/rocm-xio
 cmake --preset <preset>            # see CMakePresets.json
 cmake --build build -j"$(nproc)"
 ```

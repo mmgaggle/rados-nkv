@@ -159,9 +159,9 @@ endif()
 
 # ---- rocm-xio: GPU-initiated nvme-ep (Flow A) ------------------------------
 if(WITH_ROCM_XIO)
-  add_init(rocm-xio rocm-xio)
+  add_init(rocm-xio clients/rocm-xio)
   ExternalProject_Add(rocm-xio
-    SOURCE_DIR "${REPO}/rocm-xio"
+    SOURCE_DIR "${REPO}/clients/rocm-xio"
     CONFIGURE_COMMAND ${CMAKE_COMMAND} -E echo "configuring rocm-xio (preset: ${ROCM_XIO_PRESET})"
               COMMAND cmake --preset ${ROCM_XIO_PRESET}
     BUILD_COMMAND cmake --build build --parallel ${JOBS}
