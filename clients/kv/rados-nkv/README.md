@@ -257,7 +257,7 @@ rados-nkv ns create demo -o pool=kvpool       # -> prints "1" again (idempotent)
 
 ### `ns attach <name> -o pool=POOL [-o cluster=NAME]`
 
-Calls `nvmf_kv_ns_attach_by_name(nqn, name, pool, ...)` (bead spdk-jhk.8.2).
+Calls `nvmf_kv_ns_attach_by_name(nqn, name, pool, ...)`.
 Where `ns create` **defines** a new entry, `ns attach` **binds an existing one**
 back to the subsystem — the restart-replay verb. The target reads the pool's
 durable registry omap for `<name>` and:
@@ -349,7 +349,7 @@ headers at a tty with multiple keys).
 Because one wavefront drives **one** controller IO queue, all keys in a single
 `--gpu get` must resolve to the **same nsid**; a request spanning namespaces is
 a hard error (per-nsid splitting is a future option). Each wavefront lane carries
-a **region-bounded SGL DPTR** (bead `spdk-jhk.12`) over a per-lane buffer sized to
+a **region-bounded SGL DPTR** over a per-lane buffer sized to
 the controller max value (`NKVX_RETR_LANE_BUF`, 64 MiB), so a value larger than
 4 KiB comes back in **full** — framed at its true length, not clamped to a page —
 exactly matching the CPU `get`. (spdk-jhk.11 gave each lane a fixed 4 KiB PRP,
@@ -369,7 +369,7 @@ target).
 The namespace is selected by exporting `NKVX_NSID` to the `nkv_vfu_gpu`
 subprocess: `rados-nkv` resolves `myns` to its nsid (server registry or the
 `[namespaces]` cache) and passes it through, so `--gpu` addresses **any**
-namespace, not just nsid 1 (bead `spdk-jhk.10`). With no namespace mapping the
+namespace, not just nsid 1. With no namespace mapping the
 default is nsid 1, identical to prior behaviour.
 
 The binary is resolved from `[target] gpu_bin` in `~/.rados-nkv.conf`, else from
@@ -400,8 +400,8 @@ direct `nkv_vfu_gpu` invocation.
 ### Native HIP `--gpu` (optional `gpu-native` feature)
 
 `--gpu` has a second, **opt-in** implementation that runs the GPU-initiated
-datapath **in-process** — no subprocess — by linking the HIP runtime directly
-(bead `spdk-jhk.7.15`). It is behind the **off-by-default** `gpu-native` cargo
+datapath **in-process** — no subprocess — by linking the HIP runtime directly.
+It is behind the **off-by-default** `gpu-native` cargo
 feature so the **default build stays ROCm-free** (the design above is preserved
 unchanged):
 
@@ -420,7 +420,7 @@ it is **not** limited to the subprocess's argv-token subset: it handles binary
 values, large values (verified byte-exact to 256 KiB; up to the 64 MiB
 `max_io_size`), and an `exec -i` input payload. It keeps the same `--gpu` CLI
 surface and threads the resolved nsid straight into the SQE (so it too addresses
-any namespace, not just nsid 1; bead `spdk-jhk.10`); `--gpu exec` prints the same
+any namespace, not just nsid 1); `--gpu exec` prints the same
 `EXEC ok: GPU exec op …` lines as the subprocess path.
 
 Requirements for the feature build: `hipcc` and `libamdhip64` (ROCm). The build
@@ -503,7 +503,7 @@ EAL/attach cost across processes (`daemon start|stop|status`, `src/daemon.rs` +
 `src/proto.rs`; `spdk-jhk.7.11`). The GPU/CPU regression
 (`../vfu_host/run_tests.sh`) is green after the driver `nsid` parameterisation.
 
-Target-side follow-ups (filed as beads, not v1): a server-side namespace-name registry
+Target-side follow-ups (not in v1): a server-side namespace-name registry
 (retire the client-side `name -> nsid` map); and a real `list` key-enumeration RPC on
 the kvdev. Server semantics for `-o ttl/ephemeral/touch` landed in `spdk-jhk.7.14`
 (`prefetch` stays a documented read hint with no in-memory meaning).

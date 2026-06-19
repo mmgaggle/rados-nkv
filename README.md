@@ -1,9 +1,7 @@
 
-![rados-nkv](./docs/rados-nkv.png)
-
 # RADOS-NKV
 
-**NVMe Key-Value access to Ceph/RADOS — one substrate, for GPU-initiated and host-side data paths.**
+**The full power of RADOS, extended over NVMe key-value, for GPU-initiated and host-side data paths.**
 
 RADOS-NKV exposes Ceph/RADOS through the **NVMe Key-Value command set**. An SPDK
 `nvmf` target presents KV namespaces — `Store` / `Retrieve` / `List` / `Delete` /
@@ -72,7 +70,6 @@ Start with the architecture, then pick a flow:
 - [`docs/flow-b-host-consumers.md`](docs/flow-b-host-consumers.md) — **host-side** NIXL and weights consumers over the same target.
 - [`docs/build.md`](docs/build.md) — build order and per-component build commands (incl. `clients/` and `rados-nkvx/`).
 - [`docs/demo-e2e.md`](docs/demo-e2e.md) — step-by-step bring-up of the full end-to-end path.
-- [`docs/adr/`](docs/adr) — architecture decision records. [`docs/diagrams/`](docs/diagrams) — Mermaid + rendered PNGs.
 
 The [`scripts/rados-nkv`](scripts/rados-nkv) helper brings the SPDK NVMe-KV target
 up or down with one command (`up` / `down` / `status`). `--mem` selects the

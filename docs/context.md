@@ -45,7 +45,7 @@ in-OSD C++ mechanism we deliberately do **not** use)
 **binding**:
 A control-plane entry `(subsystem, exec-namespace, op-ID) → (runtime, module-namespace,
 module-key, artifact sha256, per-invocation caps)`. `runtime` selects the backend
-(wasmtime in v1; a Velox plan is a future kind — ADR-0012). The **sha256 is the sole
+(wasmtime in v1; a Velox plan is a future kind). The **sha256 is the sole
 authorization + integrity anchor**; `(module-namespace, module-key)` is only the
 cold-fetch locator, consulted on a content-cache miss. Per-op, finer than
 per-namespace; the same module may be bound with different caps in different
@@ -75,7 +75,7 @@ _Avoid_: persistent write
 A Store **with** a TTL: never written to RADOS — it lives in the owning-host
 executor's resident store and ages out at the TTL. No durability, replication, or
 migration; lost on host failure or CRUSH remap (lifetime = `min(TTL, time-to-remap)`).
-The KV-cache tier. The TTL is the storage-tier selector (ADR-0011).
+The KV-cache tier. The TTL is the storage-tier selector.
 _Avoid_: scratch write, soft write, cache write
 
 ### Deployment

@@ -1,7 +1,6 @@
 # rados-nkvx: Sandboxed Near-Data Computation over NVMe Key-Value
 
-**Status:** Draft for discussion — supersedes the cls-based Exec sketch (see
-[ADR-0009](adr/0009-exec-in-sandboxed-executor-not-osd-cls.md)).
+**Status:** Draft for discussion — supersedes the cls-based Exec sketch.
 **Builds on:** rados-nkv (NVMe-KV → RADOS), GPU-initiated IO via ROCm XIO + pci-mmio-bridge.
 **Glossary:** [CONTEXT.md](../CONTEXT.md) — `rados-nkv`, `rados-nkvx`, `Exec`, `module`,
 `sidecar`, cold fill, single/two-tier.
@@ -37,7 +36,7 @@ strategic core:
 ## 2. Why this shape (the decisions already made)
 
 The interface to the OSD is **unprivileged librados cold-fill, and nothing more.**
-This is settled; the rejected alternatives are recorded in ADR-0009:
+This is settled; the rejected alternatives are:
 
 - **cls-in-OSD** — synchronous under the PG op-shard lock; a multi-ms sample
   head-of-line-blocks the shard, and a runtime bug crashes a durability process
@@ -103,7 +102,7 @@ opcode, same module ABI — the only difference is where the bytes execute.
   the sandbox.
 - **Module runtime.** No WASI imports; fuel + epoch + linear-memory caps; pooling
   allocator + warm-instance cache keyed by (module, object). Module identity = sha256; authorization is by the
-  sha256 in the binding, not by key (ADR-0010). Per-invocation caps (fuel/epoch/memory)
+  sha256 in the binding, not by key. Per-invocation caps (fuel/epoch/memory)
   ride the binding; the per-namespace aggregate budget (fairness) is deferred. Modules
   live in any namespace, cold-filled by `namespace:key`, hash-verified, compiled
   (Cranelift) and cached on first use.
@@ -160,7 +159,7 @@ is the earlier, cheaper-to-prove flagship; GNN sampling is the Phase-5 finale.**
 
 ### Non-goals (v1)
 - Writes from modules (read-only is load-bearing).
-- In-OSD execution / any ceph-osd modification (ADR-0009).
+- In-OSD execution / any ceph-osd modification.
 - General WASI.
 - Messenger-level interception / a transparent proxy for arbitrary RADOS clients.
 - Replacing cls for genuine third-party cls callers (keep a thin real cls for them if
@@ -178,7 +177,7 @@ is the earlier, cheaper-to-prove flagship; GNN sampling is the Phase-5 finale.**
 - **Phase 0 — Contracts.** Freeze the Exec SQE layout (op-ID + key + request-payload
   addressing in the 64-byte command + DPTR), the **runtime-agnostic** artifact ABI
   (`op-ID → (runtime, artifact-hash, caps)`; WASM is the only runtime in v1, but the
-  ABI hosts alternates like a Velox plan without re-freezing — ADR-0012), the sidecar
+  ABI hosts alternates like a Velox plan without re-freezing), the sidecar
   schema, and the partition schema. Exit: no open ABI question that would force a
   tenant-visible change later.
 - **Phase 1 — Executor, single-tier.** wasmtime in rados-nkvx, **off-reactor**;
@@ -204,7 +203,7 @@ is the earlier, cheaper-to-prove flagship; GNN sampling is the Phase-5 finale.**
   local cache, and by how much, in the too-big-to-cache regime?"
 - **Phase 6 — Read/write pushdown + ephemeral TTL tier (deferred).** Route
   Retrieve/Store to the owning-host executor; TTL writes become the ephemeral
-  cache-resident tier, no-TTL writes durable RADOS write-through (ADR-0011); the
+  cache-resident tier, no-TTL writes durable RADOS write-through; the
   two-pool eviction policy is resolved here (it rides with this work, not v1).
   Deliberately sequenced *after* the computational runtime is solid — Phases 0–5 stay
   focused on Exec. This is the second major track, not part of v1.
@@ -248,7 +247,7 @@ Carried forward (largely unchanged by the pivot):
    staging key. Leaning DPTR-shared.
 2. Result-size negotiation: true length in CQE DW0 + caller-provided max, mirroring
    Retrieve and its torn-read fence.
-3. **Resolved (ADR-0010):** modules in arbitrary namespaces (operator- or
+3. **Resolved:** modules in arbitrary namespaces (operator- or
    tenant-curated), bound by `namespace:key:sha256`; the sidecar ships hash + caps,
    never bytes. Authority is the hash; `namespace:key` is only the cold-fetch locator.
 4. **Resolved:** per-invocation caps (on the binding) ship in slice #1 as the safety
@@ -267,7 +266,7 @@ New from the pivot:
    cold fill" cost accepted.
 9. Result-cache key canonicalization (Arrow IPC framing must be byte-canonical to be a
    safe hash key) — the correctness surface of the memoization feature.
-10. Velox as a sibling runtime (not nested — ADR-0012): embeddable single-threaded mode,
+10. Velox as a sibling runtime (not nested): embeddable single-threaded mode,
    zero-copy Arrow→Velox import, plan serialization (Substrait or native) as the
    artifact, footprint next to SPDK. WASM stays the first path; Velox targets the
    columnar/relational slice (feature gather, KV-transforms).

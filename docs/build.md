@@ -131,7 +131,7 @@ cargo build --release --manifest-path clients/kv/rados-nkv/Cargo.toml
 ## 1c. rados-nkvx — the standalone Exec executor (storage side)
 
 The restartable wasmtime-sandbox executor (`rados-nkvx/`) is **non-SPDK by
-design** (ADR-0009) and links Mercury + librados, not SPDK libs. It reuses the
+design** and links Mercury + librados, not SPDK libs. It reuses the
 Exec RPC contract + wasm core + `wasmtime/include` from the spdk submodule's
 `module/kvdev/rados/` (those stay in the fork — the in-tree `kvdev_rados` module
 compiles them too). Needs the Mercury install from `$SPDK_ROOT/vendor/`.

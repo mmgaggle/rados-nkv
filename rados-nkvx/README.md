@@ -1,7 +1,7 @@
 # rados-nkvx — standalone Exec executor
 
 The restartable wasmtime-sandbox executor that runs Exec modules on the storage
-host (ADR-0009: in a sandboxed executor, **never** linked into `ceph-osd`).
+host (in a sandboxed executor, **never** linked into `ceph-osd`).
 Moved out of the SPDK tree (it is non-SPDK by design) to keep the spdk fork
 small — the analog of `clients/` for the executor side.
 

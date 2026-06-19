@@ -1,4 +1,4 @@
-# rados-nkvx wasm Exec modules (TB-WIMP / ADR-0013)
+# rados-nkvx wasm Exec modules (TB-WIMP)
 
 Precompiled `.wasm` modules for the real-wasm KV Exec path. A KV Exec whose
 binding is `nkvx:wasm:<name>` runs `<name>.wasm` from this directory in the
@@ -57,7 +57,7 @@ When an Exec carries an object key (the oid), the executor routes the wasm run
 through `kvdev_rados_nkvx_wasm_run_cached`: the object is cold-filled ONCE into an
 executor-owned, content-addressed buffer; subsequent Execs of the same object are
 served locally (no librados refetch), the wasm linear memory is backed zero-copy
-by that buffer via the custom `MemoryCreator` (on-demand strategy, ADR-0013), and
+by that buffer via the custom `MemoryCreator` (on-demand strategy), and
 the instantiated instance is reused (warm-instance cache keyed by `(module,
 object)`). See `module/kvdev/rados/kvdev_rados_nkvx_wasm.c`.
 
