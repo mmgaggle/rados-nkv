@@ -34,7 +34,7 @@ option(WITH_SPDK     "Build SPDK (the NVMe-KV-on-RADOS substrate)"          ON)
 option(WITH_ROCM_XIO "Build rocm-xio (Flow A: GPU-initiated)"               ON)
 option(WITH_QEMU     "Build qemu (Flow A: pci-mmio-bridge)"                 ON)
 option(WITH_NIXL     "Build the NIXL RADOS_NKV backend (Flow B)"            ON)
-option(WITH_WEIGHTS  "Set up rados-nkv-weights (Flow B)"                    ON)
+option(WITH_WEIGHTS  "Set up the vllm-weights catalog (Flow B)"                    ON)
 option(WITH_QEMU_MINIMAL "Use qemu-minimal (guest VM tooling, Flow A)"      ON)
 option(WITH_CLIENTS  "Build clients/ (KV host/test harness, against spdk)"  ON)
 option(WITH_RADOS_NKVX "Build rados-nkvx/ (standalone Exec executor)"       ON)
@@ -207,24 +207,22 @@ if(WITH_NIXL)
   list(APPEND INIT_TARGETS init-nixl)
 endif()
 
-# ---- rados-nkv-weights: weights catalog (Flow B) ---------------------------
+# ---- vllm-weights: weights catalog, vendored in-tree (Flow B) --------------
 if(WITH_WEIGHTS)
-  add_init(weights rados-nkv-weights)
-  set(_weights_deps init-weights)
+  set(_weights_deps "")
   set(_weights_build ".venv/bin/pip install -e .")
   if(WITH_SPDK)
     list(APPEND _weights_deps spdk)
     string(APPEND _weights_build " && SPDK_ROOT=${REPO}/spdk ./native/build.sh")
   endif()
   ExternalProject_Add(weights
-    SOURCE_DIR "${REPO}/rados-nkv-weights"
+    SOURCE_DIR "${REPO}/clients/vllm-weights"
     CONFIGURE_COMMAND python3 -m venv .venv
     BUILD_COMMAND sh -c "${_weights_build}"
     DEPENDS ${_weights_deps}
     ${EP_COMMON})
   add_build_alias(weights)
   list(APPEND BUILD_TARGETS weights)
-  list(APPEND INIT_TARGETS init-weights)
 endif()
 
 # ---- qemu-minimal: guest VM tooling (no compile; scripts only) -------------

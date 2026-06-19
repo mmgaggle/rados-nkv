@@ -58,7 +58,7 @@ ninja -C build
 
 Full reference: [`nixl/src/plugins/rados-nkv/README.md`](../nixl/src/plugins/rados-nkv/README.md).
 
-## Consumer #2 — rados-nkv-weights (`rados-nkv-weights@main`)
+## Consumer #2 — vllm-weights (`clients/vllm-weights`)
 
 A **model-weights catalog** over one shared, **read-only** NVMe-KV namespace
 that acts as a directory — serving immutable model weights to a GPU fleet with
@@ -97,7 +97,7 @@ read-only namespace in `ctrlr_kvdev.c` rejects `Store`/`Delete`/`Exec`).
 wrapper over a `.so` built from the **same** SPDK `kv_host_shim.c`:
 
 ```bash
-cd rados-nkv-weights
+cd clients/vllm-weights
 SPDK_ROOT=$PWD/../spdk ./native/build.sh   # -> native/libradosnkv_kvshim.so
 ```
 
@@ -117,8 +117,7 @@ the NIXL plugin's `vfu_addr` takes.
 
 A dev loop with no SPDK/Ceph at all uses the dict-backed `InMemoryKvClient`.
 
-Full reference: [`rados-nkv-weights/README.md`](../rados-nkv-weights/README.md)
-and [`rados-nkv-weights/CONTEXT.md`](../rados-nkv-weights/CONTEXT.md).
+Full reference: [`clients/vllm-weights/README.md`](../clients/vllm-weights/README.md).
 
 ## Why both share one substrate
 

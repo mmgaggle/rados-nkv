@@ -23,13 +23,13 @@ BUILD_DIR  ?= build
 CMAKE      ?= cmake
 CMAKE_ARGS ?=
 
-COMPONENTS := ceph spdk rocm-xio qemu nixl weights
+COMPONENTS := ceph spdk rocm-xio qemu nixl
 
 # Targets handled by the CMake superbuild, forwarded verbatim as build targets.
 FORWARD := build init vstart stop up down status deps-ceph \
            vm vm-run vm-run-spdk vm-vfio-rules init-qemu-minimal \
-           $(COMPONENTS) \
-           $(addprefix build-,$(COMPONENTS)) \
+           $(COMPONENTS) weights \
+           $(addprefix build-,$(COMPONENTS)) build-weights \
            $(addprefix init-,$(COMPONENTS))
 
 .DEFAULT_GOAL := help

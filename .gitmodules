@@ -14,10 +14,6 @@
 	path = qemu
 	url = https://github.com/sbates130272/qemu.git
 	branch = dev/stephen/pci-mmio-bridge-submit
-[submodule "rados-nkv-weights"]
-	path = rados-nkv-weights
-	url = git@github.ibm.com:ceph/rados-nkv-weights.git
-	branch = main
 [submodule "ceph"]
 	path = ceph
 	url = https://github.com/ceph/ceph.git

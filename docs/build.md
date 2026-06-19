@@ -16,8 +16,8 @@ are independent of each other.
         ┌───────────────┼───────────────┬──────────────────┐
         ▼               ▼               ▼                  ▼
    ┌─────────┐    ┌──────────┐   ┌───────────────┐   ┌──────────┐
-   │ rocm-xio│    │  nixl    │   │ rados-nkv-    │   │  qemu    │
-   │ nvme-ep │    │RADOS_NKV │   │ weights       │   │ pci-mmio │
+   │ rocm-xio│    │  nixl    │   │ vllm-weights  │   │  qemu    │
+   │ nvme-ep │    │RADOS_NKV │   │ catalog       │   │ pci-mmio │
    │ (Flow A)│    │ (Flow B) │   │ (Flow B)      │   │ -bridge  │
    └─────────┘    └──────────┘   └───────────────┘   └──────────┘
 ```
@@ -65,7 +65,7 @@ Other knobs (CMake cache vars): `JOBS` (parallelism), `SPDK_CONFIGURE_OPTS`
 The rest of this document is the **manual** equivalent: what each `make` target
 runs under the hood, and the authoritative per-component build docs
 (`spdk/README.md`, `clients/rocm-xio/INSTALL.md`, `nixl/README.md`,
-`rados-nkv-weights/README.md`, QEMU's `docs/`). Populate submodules manually with:
+`clients/vllm-weights/README.md`, QEMU's `docs/`). Populate submodules manually with:
 
 ```bash
 git submodule update --init --recursive   # or per-component, listed in README.md
@@ -185,13 +185,13 @@ ninja -C build test               # unit suite incl. key-derivation tests
 
 The plugin is skipped automatically if `libspdk_nvme.a` / the shim aren't found.
 
-## 5. rados-nkv-weights — Flow B (weights catalog)
+## 5. vllm-weights — Flow B (weights catalog)
 
 Pure-Python core (pyarrow + numpy); the native NVMe-KV transport is an optional
 `.so` built against SPDK:
 
 ```bash
-cd rados-nkv-weights
+cd clients/vllm-weights
 python -m venv .venv && . .venv/bin/activate
 pip install pyarrow numpy && pip install -e .
 python -m pytest tests/ -v        # exercises the in-memory client

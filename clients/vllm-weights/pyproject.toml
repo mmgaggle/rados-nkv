@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rados-nkv-weights"
+version = "0.1.0"
+description = "NVMe-KV-on-RADOS model-weights catalog: publisher (write) and loader (read)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "LGPL-3.0-only" }
+authors = [{ name = "rados-nkv-weights contributors" }]
+keywords = ["nvme-kv", "rados", "ceph", "model-weights", "vllm", "arrow"]
+dependencies = [
+    "pyarrow",
+    "numpy",
+]
+
+[project.optional-dependencies]
+publish = [
+    "safetensors",
+    "huggingface_hub",
+]
+# Real NVMe-KV transport (rados_nkv_weights.nvmekv_client.NvmeKvClient). The
+# Python side is stdlib-only (ctypes), so this extra carries no extra wheels;
+# the heavy part is the native shim, which must be built separately against a
+# built SPDK tree:
+#
+#     SPDK_ROOT=/path/to/spdk ./native/build.sh
+#
+# then point RADOSNKV_KVSHIM_LIB at native/libradosnkv_kvshim.so (or leave it on
+# the default search path). The core package stays pure-Python and importable
+# without this.
+nvmekv = []
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+rados-nkv-publish = "rados_nkv_weights.publisher:main"
+rados-nkv-load = "rados_nkv_weights.loader:main"
+
+# vLLM auto-discovers general plugins via this entry-point group and calls the
+# referenced function during startup; ours registers the
+# `--load-format=rados-nkv` model loader (rados_nkv_weights.vllm_loader.register
+# is re-entrant and imports vllm lazily). Only active when vLLM is installed in
+# the same environment; it adds no import-time dependency to the core package.
+[project.entry-points."vllm.general_plugins"]
+rados_nkv_weights = "rados_nkv_weights.vllm_loader:register"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rados_nkv_weights = ["py.typed"]

@@ -10,7 +10,7 @@ object-storage credentials in the data path.
 ```
        Flow A (GPU-initiated)                Flow B (host-side consumers)
   ┌───────────────────────────────┐    ┌──────────────────────────────────────┐
-  │ rocm-xio nvme-ep --kv-op      │    │ NIXL RADOS_NKV     rados-nkv-weights │
+  │ rocm-xio nvme-ep --kv-op      │    │ NIXL RADOS_NKV     vllm-weights      │
   │  (GPU __device__ KV SQE)      │    │  WRITE/READ/query   publisher/loader │
   │            │                  │    │        │                  │          │
   │  qemu pci-mmio-bridge         │    │        └── kv_host_shim.{c,h} ───────┤
@@ -117,7 +117,7 @@ derives the fixed-length NVMe KV key as a 128-bit FNV-1a hash truncated to
 `min(16, kvkml)` (`radosNkvDeriveKey`). This is the llm-d KV-cache offload
 transport. See [`flow-b-host-consumers.md`](flow-b-host-consumers.md).
 
-### `rados-nkv-weights` — the weights catalog (`github.ibm.com/ceph/rados-nkv-weights@main`)
+### `vllm-weights` — the weights catalog (`clients/vllm-weights`)
 
 A **second, independent consumer** of the same substrate that serves *immutable
 model weights* to a GPU fleet through one shared, **read-only** KV namespace

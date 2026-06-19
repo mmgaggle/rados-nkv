@@ -101,7 +101,7 @@ The script Stores via `NIXL_WRITE`, Retrieves via `NIXL_READ`, probes with
 ## Step 4 — Flow B: publish + load model weights
 
 ```bash
-cd rados-nkv-weights && . .venv/bin/activate
+cd clients/vllm-weights && . .venv/bin/activate
 python - <<'PY'
 from rados_nkv_weights.nvmekv_client import NvmeKvClient
 from rados_nkv_weights import publish, load

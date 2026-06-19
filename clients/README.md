@@ -7,7 +7,7 @@ fork small. They build **against the `spdk` submodule** (their Makefiles set
 
 | Path | What |
 |------|------|
-| `kv_shim/` | Reusable in-process KV client `kv_host_shim.{c,h}` + `kv_shim_test`. Consumed by `nixl` and `rados-nkv-weights`. |
+| `kv_shim/` | Reusable in-process KV client `kv_host_shim.{c,h}` + `kv_shim_test`. Consumed by `nixl` and `vllm-weights`. |
 | `kv/` | Standalone hosts `kv_host` / `kv_ro_host`, fio verify (`kv_verify.fio`), vfio-user + Exec test scripts. |
 | `rkv/` | The `rados-nkv` crate (binary: `rkv`), a Rust/HIP CLI (CPU default; `gpu-native` feature needs hipcc/ROCm). |
 | `kv/vfu_host/` | Raw vfio-user host (`nkv_vfu_host`) + GPU-initiated variant and two-tier bring-up scripts. |

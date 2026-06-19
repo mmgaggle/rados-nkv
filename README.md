@@ -15,7 +15,7 @@ One target serves three consumers over the same substrate:
 - **GPU-initiated** — an AMD GPU issues KV Store/Retrieve directly from
   `__device__` code, with the value landing in GPU memory (VRAM via P2P-DMA).
 - **NIXL `RADOS_NKV`** — an NVMe-KV transfer backend for llm-d KV-cache offload.
-- **rados-nkv-weights** — a model-weights catalog over a shared read-only namespace.
+- **vllm-weights** — a model-weights catalog over a shared read-only namespace.
 
 ```
    GPU __device__ code (gfx1151)                 host-side NIXL / weights
@@ -46,6 +46,7 @@ executor, the KV client/test harnesses, and the documentation.
 | Path | Role |
 |------|------|
 | [`clients/`](clients) | NVMe-KV host & test harnesses — the `kv_host_shim` the host consumers link against, the standalone hosts, the `rkv` command-line client (the `rados-nkv` Rust/HIP crate — the ergonomic way to drive the datapath by hand), and the vfio-user host. Builds against the `spdk` submodule. |
+| [`clients/vllm-weights/`](clients/vllm-weights) | **Host consumer (Flow B).** Model-weights catalog (publisher + loader) over a shared read-only NVMe-KV namespace — the vLLM weights loader. Vendored in-tree. |
 | [`rados-nkvx/`](rados-nkvx) | The standalone, restartable **Exec executor** (wasmtime sandbox) that runs near-data Exec modules on the storage host. |
 | [`docs/`](docs), [`CMakeLists.txt`](CMakeLists.txt), [`scripts/`](scripts) | Architecture/flow docs, the CMake superbuild + `make` wrapper, and the `rados-nkv` target bring-up helper. |
 
@@ -59,7 +60,6 @@ executor, the KV client/test harnesses, and the documentation.
 | [`qemu`](qemu) | [`sbates130272/qemu`](https://github.com/sbates130272/qemu) | `dev/stephen/pci-mmio-bridge-submit` | **GPU↔NVMe bridge.** The `pci-mmio-bridge` device forwards the GPU's doorbell MMIO to the SPDK NVMe BAR. |
 | [`qemu-minimal`](qemu-minimal) | [`sbates130272/qemu-minimal`](https://github.com/sbates130272/qemu-minimal) | `main` | **Guest VM tooling.** Cloud-init VM creation + a launcher with GPU `vfio-pci` passthrough, libvfio-user sockets, and the bridge device. |
 | [`nixl`](nixl) | [`mmgaggle/nixl`](https://github.com/mmgaggle/nixl/tree/rados-nkv) | `rados-nkv` | **Host consumer.** The `RADOS_NKV` NIXL backend maps `NIXL_WRITE`/`READ`/`queryMem` onto KV Store/Retrieve/Exist. |
-| [`rados-nkv-weights`](rados-nkv-weights) | `github.ibm.com/ceph/rados-nkv-weights` | `main` | **Host consumer.** Model-weights catalog (publisher + loader) over a shared read-only NVMe-KV namespace. |
 
 ## Documentation
 
@@ -86,13 +86,13 @@ git submodule update --init --recursive          # everything (pulls several GB)
 
 # or, per flow:
 git submodule update --init spdk clients/rocm-xio qemu qemu-minimal   # Flow A (GPU-initiated)
-git submodule update --init spdk nixl rados-nkv-weights       # Flow B (host consumers)
+git submodule update --init spdk nixl                         # Flow B (host consumers)
 git submodule update --init ceph                              # real RADOS backend (either flow)
 ```
 
 > Skip `ceph` and use SPDK's in-memory `kvdev_mem` backend for a dev loop that
-> needs no cluster. `rados-nkv-weights` is on the internal `github.ibm.com`
-> remote; the other submodules are public.
+> needs no cluster. The `vllm-weights` catalog is vendored in-tree under
+> `clients/`; all submodules are public.
 
 ## Building
 
