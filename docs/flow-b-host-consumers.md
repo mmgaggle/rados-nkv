@@ -16,7 +16,7 @@ loop); the printed `vfu_addr` is what `vfu_addr` / `NvmeKvClient` take below.
 ## Consumer #1 — NIXL `RADOS_NKV` backend (`nixl@rados-nkv`)
 
 A NIXL South-Bound storage backend
-([`nixl/src/plugins/rados-nkv/`](../nixl/src/plugins/rados-nkv)) that maps NIXL
+([`nixl/src/plugins/rados-nkv/`](../clients/nixl/src/plugins/rados-nkv)) that maps NIXL
 transfers onto the NVMe KV command set — the **llm-d KV-cache offload**
 transport.
 
@@ -41,7 +41,7 @@ domain directory), `nsid` (optional; `0` auto-selects the first KV namespace),
 ### Building & testing
 
 ```bash
-cd nixl
+cd clients/nixl
 meson setup build \
     -Dspdk_root=$PWD/../spdk \
     -Dspdk_kv_shim_dir=$PWD/../spdk/test/nvmf/kv_shim \
@@ -53,10 +53,10 @@ ninja -C build
   the key derivation; runs in the standard `ninja -C build test` suite.
 - **End-to-end (needs SPDK):** the plugin ships two bring-up scripts that stand
   up an `nvmf_tgt` KV namespace over VFIOUSER and run the round-trip test:
-  - [`run_roundtrip.sh`](../nixl/src/plugins/rados-nkv/run_roundtrip.sh) — in-memory `kvdev_mem`.
-  - [`run_roundtrip_rados.sh`](../nixl/src/plugins/rados-nkv/run_roundtrip_rados.sh) — librados-backed; also asserts the value lands as a Ceph object.
+  - [`run_roundtrip.sh`](../clients/nixl/src/plugins/rados-nkv/run_roundtrip.sh) — in-memory `kvdev_mem`.
+  - [`run_roundtrip_rados.sh`](../clients/nixl/src/plugins/rados-nkv/run_roundtrip_rados.sh) — librados-backed; also asserts the value lands as a Ceph object.
 
-Full reference: [`nixl/src/plugins/rados-nkv/README.md`](../nixl/src/plugins/rados-nkv/README.md).
+Full reference: [`nixl/src/plugins/rados-nkv/README.md`](../clients/nixl/src/plugins/rados-nkv/README.md).
 
 ## Consumer #2 — vllm-weights (`clients/vllm-weights`)
 

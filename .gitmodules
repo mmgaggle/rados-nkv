@@ -7,7 +7,7 @@
 	url = https://github.com/mmgaggle/rocm-xio.git
 	branch = nvme-kv
 [submodule "nixl"]
-	path = nixl
+	path = clients/nixl
 	url = https://github.com/mmgaggle/nixl.git
 	branch = rados-nkv
 [submodule "qemu"]

@@ -88,7 +88,7 @@ See [`flow-a-gpu-initiated.md`](flow-a-gpu-initiated.md) and the bundled
 ## Step 3 — Flow B: NIXL round-trip over the same target
 
 ```bash
-cd nixl
+cd clients/nixl
 # point the agent at the listener dir from Step 1
 NIXL_RADOS_NKV_VFU_ADDR=/var/run/muser/domain/kv/0 \
     ./src/plugins/rados-nkv/run_roundtrip_rados.sh

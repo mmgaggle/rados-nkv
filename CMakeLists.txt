@@ -188,13 +188,13 @@ endif()
 
 # ---- nixl: RADOS_NKV backend (Flow B) — links the SPDK shim ----------------
 if(WITH_NIXL)
-  add_init(nixl nixl)
+  add_init(nixl clients/nixl)
   set(_nixl_deps init-nixl)
   if(WITH_SPDK)
     list(APPEND _nixl_deps spdk)
   endif()
   ExternalProject_Add(nixl
-    SOURCE_DIR "${REPO}/nixl"
+    SOURCE_DIR "${REPO}/clients/nixl"
     CONFIGURE_COMMAND meson setup build
               -Dspdk_root=${REPO}/spdk
               -Dspdk_kv_shim_dir=${REPO}/clients/kv_shim

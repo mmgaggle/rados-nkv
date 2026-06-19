@@ -64,7 +64,7 @@ Other knobs (CMake cache vars): `JOBS` (parallelism), `SPDK_CONFIGURE_OPTS`
 
 The rest of this document is the **manual** equivalent: what each `make` target
 runs under the hood, and the authoritative per-component build docs
-(`spdk/README.md`, `clients/rocm-xio/INSTALL.md`, `nixl/README.md`,
+(`spdk/README.md`, `clients/rocm-xio/INSTALL.md`, `clients/nixl/README.md`,
 `clients/vllm-weights/README.md`, QEMU's `docs/`). Populate submodules manually with:
 
 ```bash
@@ -174,10 +174,10 @@ Use this `qemu-system-x86_64` to launch the GPU-passthrough guest with the
 Point the build at the SPDK tree from step 1:
 
 ```bash
-cd nixl
+cd clients/nixl
 meson setup build \
-    -Dspdk_root=$PWD/../spdk \
-    -Dspdk_kv_shim_dir=$PWD/../clients/kv_shim \
+    -Dspdk_root=$PWD/../../spdk \
+    -Dspdk_kv_shim_dir=$PWD/../kv_shim \
     -Drados_nkv_build_test=true
 ninja -C build
 ninja -C build test               # unit suite incl. key-derivation tests
@@ -198,15 +198,15 @@ python -m pytest tests/ -v        # exercises the in-memory client
 
 # Native transport against the real target (optional):
 # NOTE: kv_host_shim moved to clients/kv_shim; native/build.sh must locate the
-# shim there (e.g. KV_SHIM_DIR=$PWD/../clients/kv_shim) — see the weights repo.
-SPDK_ROOT=$PWD/../spdk ./native/build.sh   # -> native/libradosnkv_kvshim.so
+# shim there (e.g. KV_SHIM_DIR=$PWD/../kv_shim) — see the weights repo.
+SPDK_ROOT=$PWD/../../spdk ./native/build.sh   # -> native/libradosnkv_kvshim.so
 ```
 
 ## Quick dev loop (no Ceph, no GPU)
 
 You can exercise the host consumers end-to-end against the **in-memory** kvdev:
 
-- NIXL: `nixl/src/plugins/rados-nkv/run_roundtrip.sh` (uses `kvdev_mem`).
+- NIXL: `clients/nixl/src/plugins/rados-nkv/run_roundtrip.sh` (uses `kvdev_mem`).
 - weights: `pytest` against `InMemoryKvClient`.
 
 Bring up real Ceph only when you want `kvdev_rados` (e.g. SPDK's `vstart`-style
