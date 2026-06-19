@@ -30,6 +30,8 @@ option(WITH_QEMU     "Build qemu (Flow A: pci-mmio-bridge)"                 ON)
 option(WITH_NIXL     "Build the NIXL RADOS_NKV backend (Flow B)"            ON)
 option(WITH_WEIGHTS  "Set up rados-nkv-weights (Flow B)"                    ON)
 option(WITH_QEMU_MINIMAL "Use qemu-minimal (guest VM tooling, Flow A)"      ON)
+option(WITH_CLIENTS  "Build clients/ (KV host/test harness, against spdk)"  ON)
+option(WITH_RADOS_NKVX "Build rados-nkvx/ (standalone Exec executor)"       ON)
 
 # ---- knobs -----------------------------------------------------------------
 ProcessorCount(NPROC)
@@ -108,6 +110,45 @@ if(WITH_SPDK)
   add_build_alias(spdk)
   list(APPEND BUILD_TARGETS spdk)
   list(APPEND INIT_TARGETS init-spdk)
+endif()
+
+# ---- clients: KV host/test harness — builds against the spdk submodule ------
+# In-repo (not a submodule), so no init target. The Makefiles default
+# SPDK_ROOT_DIR to ../../spdk and the Rust crate defaults NKVX_SPDK_BUILD to
+# ../../../spdk/build, so they build once spdk is built. gpu-native (hipcc/ROCm)
+# is off by default — the superbuild builds the CPU clients only.
+if(WITH_CLIENTS AND WITH_SPDK)
+  ExternalProject_Add(clients
+    SOURCE_DIR "${REPO}/clients"
+    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E true
+    BUILD_COMMAND     make -C kv_shim -j${JOBS}
+          COMMAND     make -C kv -j${JOBS}
+          COMMAND     make -C kv_rados -j${JOBS}
+          COMMAND     make -C kv/vfu_host -j${JOBS}
+          COMMAND     cargo build --release --manifest-path kv/rados-nkv/Cargo.toml
+    DEPENDS spdk
+    ${EP_COMMON})
+  add_build_alias(clients)
+  list(APPEND BUILD_TARGETS clients)
+endif()
+
+# ---- rados-nkvx: standalone Exec executor (non-SPDK) -----------------------
+# Links Mercury (from $SPDK_ROOT/vendor/mercury-install) + librados; reuses the
+# Exec contract / wasm core / wasmtime headers from the spdk submodule's
+# module/kvdev/rados (which stay in the fork as SPDK module code).
+if(WITH_RADOS_NKVX AND WITH_SPDK)
+  set(_nkvx_deps spdk)
+  if(WITH_CEPH)
+    list(APPEND _nkvx_deps ceph)         # links librados
+  endif()
+  ExternalProject_Add(rados-nkvx
+    SOURCE_DIR "${REPO}/rados-nkvx"
+    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E true
+    BUILD_COMMAND make -j${JOBS}
+    DEPENDS ${_nkvx_deps}
+    ${EP_COMMON})
+  add_build_alias(rados-nkvx)
+  list(APPEND BUILD_TARGETS rados-nkvx)
 endif()
 
 # ---- rocm-xio: GPU-initiated nvme-ep (Flow A) ------------------------------
