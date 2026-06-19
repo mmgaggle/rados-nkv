@@ -1,0 +1,1064 @@
+/*   SPDX-License-Identifier: BSD-3-Clause
+ *   Copyright (C) 2026 IBM Corporation. All rights reserved.
+ */
+
+/*
+ * Minimal KV host (initiator) for the end-to-end vfio-user round-trip test.
+ *
+ * It attaches to an NVMf controller over the VFIOUSER transport, finds the
+ * first Key-Value namespace (CSI == SPDK_NVME_CSI_KV), issues a KV Store and
+ * then a KV Retrieve for the same key, and verifies the retrieved bytes match.
+ *
+ * Usage: kv_host <vfio-user-socket-dir> [exec_mode]
+ *
+ * exec_mode selects how the vendor KV Exec phase (ADR-0005) is checked against
+ * the per-namespace allowlist enforced by the target:
+ *   - "reject" : op-IDs are NOT allowlisted; KV Exec must fail with
+ *                INVALID_OPCODE (01h). This is the default-deny path.
+ *   - "allow"  : op-IDs 1 (echo) and 2 (append) ARE allowlisted; the
+ *                echo+append round-trip must succeed. (default)
+ */
+
+#include "spdk/stdinc.h"
+#include "spdk/env.h"
+#include "spdk/log.h"
+#include "spdk/nvme.h"
+#include "spdk/nvme_kv.h"
+#include "spdk/string.h"
+
+static const char g_key[] = "kvkey01";
+static const char g_value[] = "the quick brown fox jumps over the lazy dog";
+
+/* Extra keys stored to exercise the KV List command. g_key above is also
+ * expected to come back from List. */
+static const char *const g_list_keys[] = {
+	"alpha", "bravo", "charlie", "delta",
+};
+#define NUM_LIST_KEYS (sizeof(g_list_keys) / sizeof(g_list_keys[0]))
+
+/* TTL (seconds) stored via the vendor _ext API (ADR-0003). The shell driver
+ * reads it back from the target through the kvdev_mem_get_entry RPC and asserts
+ * it round-tripped. */
+#define KV_TEST_TTL_SECONDS 4242
+
+struct kv_ctx {
+	struct spdk_nvme_ctrlr	*ctrlr;
+	struct spdk_nvme_ns	*ns;
+	struct spdk_nvme_qpair	*qpair;
+	volatile bool		done;
+	volatile bool		failed;
+	/* Status code (sct/sc) of the most recently completed command. */
+	volatile uint8_t	last_sct;
+	volatile uint8_t	last_sc;
+	/* cdw0 of the most recently completed command. For KV Exec this is the
+	 * TRUE output length the backend reported (value_len). */
+	volatile uint32_t	last_cdw0;
+};
+
+static bool
+probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
+	 struct spdk_nvme_ctrlr_opts *opts)
+{
+	return true;
+}
+
+static void
+attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
+	  struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_ctrlr_opts *opts)
+{
+	struct kv_ctx *ctx = cb_ctx;
+
+	ctx->ctrlr = ctrlr;
+}
+
+static void
+io_complete(void *arg, const struct spdk_nvme_cpl *cpl)
+{
+	struct kv_ctx *ctx = arg;
+
+	ctx->last_sct = cpl->status.sct;
+	ctx->last_sc = cpl->status.sc;
+	ctx->last_cdw0 = cpl->cdw0;
+
+	if (spdk_nvme_cpl_is_error(cpl)) {
+		fprintf(stderr, "KV command failed: sct=%d sc=%d\n",
+			cpl->status.sct, cpl->status.sc);
+		ctx->failed = true;
+	} else {
+		fprintf(stderr, "KV command completed: cdw0=%u\n", cpl->cdw0);
+	}
+	ctx->done = true;
+}
+
+/*
+ * Submit a no-data KV command (Delete or Exist) and wait for it, returning the
+ * NVMe status code (sc) the device reported. sct is asserted to be GENERIC.
+ */
+static int
+run_no_data(struct kv_ctx *ctx, int (*submit)(struct spdk_nvme_ns *,
+		struct spdk_nvme_qpair *, const void *, uint8_t,
+		spdk_nvme_cmd_cb, void *), const char *what)
+{
+	int rc;
+
+	ctx->done = false;
+	ctx->failed = false;
+	rc = submit(ctx->ns, ctx->qpair, g_key, strlen(g_key), io_complete, ctx);
+	if (rc != 0) {
+		fprintf(stderr, "%s submit failed: %d\n", what, rc);
+		return -1;
+	}
+	while (!ctx->done) {
+		spdk_nvme_qpair_process_completions(ctx->qpair, 0);
+	}
+	if (ctx->last_sct != SPDK_NVME_SCT_GENERIC) {
+		fprintf(stderr, "%s: unexpected sct=%u\n", what, ctx->last_sct);
+		return -1;
+	}
+	return ctx->last_sc;
+}
+
+static int
+wait_for_completion(struct kv_ctx *ctx)
+{
+	ctx->done = false;
+	ctx->failed = false;
+	while (!ctx->done) {
+		spdk_nvme_qpair_process_completions(ctx->qpair, 0);
+	}
+	return ctx->failed ? -1 : 0;
+}
+
+/*
+ * Bounded variant of wait_for_completion used by the rados-exec path (KVX-3).
+ * A KV Exec maps to an OSD-side rados_aio_exec; if the vstart OSD is DOWN or
+ * WEDGED (e.g. crashed by a bad object class), the command never completes and
+ * the plain wait_for_completion() above would spin FOREVER. This version gives
+ * up after timeout_s seconds and reports failure so the e2e fails fast instead
+ * of hanging. Returns 0 on success, -1 on command error, -2 on timeout.
+ */
+static int
+wait_for_completion_timeout(struct kv_ctx *ctx, unsigned timeout_s)
+{
+	uint64_t deadline;
+
+	ctx->done = false;
+	ctx->failed = false;
+	deadline = spdk_get_ticks() + (uint64_t)timeout_s * spdk_get_ticks_hz();
+	while (!ctx->done) {
+		spdk_nvme_qpair_process_completions(ctx->qpair, 0);
+		if (!ctx->done && spdk_get_ticks() >= deadline) {
+			fprintf(stderr,
+				"TIMEOUT: KV Exec did not complete within %us "
+				"(OSD down or wedged?)\n", timeout_s);
+			return -2;
+		}
+	}
+	return ctx->failed ? -1 : 0;
+}
+
+/* Per-KV-Exec completion budget for the rados-exec path. The cls round-trip
+ * through a healthy vstart OSD is sub-second; 20s is generous headroom while
+ * still bounding a dead/wedged-OSD hang to seconds, not forever. */
+#define KV_RADOS_EXEC_TIMEOUT_S 20u
+
+int
+main(int argc, char **argv)
+{
+	struct spdk_env_opts opts;
+	struct spdk_nvme_transport_id trid = {};
+	struct kv_ctx ctx = {};
+	const struct spdk_nvme_kv_ns_data *kv_ns_data;
+	uint32_t nsid;
+	char *store_buf = NULL;
+	char *retrieve_buf = NULL;
+	uint8_t *list_buf = NULL;
+	const uint32_t buf_len = 256;
+	uint32_t i;
+	int rc = 1;
+	int sc;
+	bool exec_reject;
+	bool exec_rados;
+	bool exec_nkvx;
+
+	if (argc < 2) {
+		fprintf(stderr, "Usage: %s <vfio-user-socket-path> [reject|allow|rados-exec|nkvx-exec]\n",
+			argv[0]);
+		return 1;
+	}
+	/* KV Exec allowlist phase (ADR-0005): "reject" => expect default-deny,
+	 * "rados-exec" => exercise the librados backend's KV Exec -> rados_aio_exec
+	 * path (KVX-3) against the OSD-side kvtest cls, "nkvx-exec" => exercise the
+	 * NEW in-process sandboxed executor (ADR-0009/TB1) running a built-in module
+	 * OFF the reactor against a RADOS object, anything else (default) => the
+	 * in-memory op-IDs are allowlisted and exec must succeed. */
+	exec_reject = (argc > 2 && strcmp(argv[2], "reject") == 0);
+	exec_rados = (argc > 2 && strcmp(argv[2], "rados-exec") == 0);
+	exec_nkvx = (argc > 2 && strcmp(argv[2], "nkvx-exec") == 0);
+
+	opts.opts_size = sizeof(opts);
+	spdk_env_opts_init(&opts);
+	opts.name = "kv_host";
+	/* On a host without configured hugepages (e.g. a shared rig running the
+	 * target with --no-huge), let the harness drive the initiator the same way
+	 * via KV_HOST_NO_HUGE=1 + optional KV_HOST_MEM_MB. */
+	if (getenv("KV_HOST_NO_HUGE") != NULL) {
+		const char *mb = getenv("KV_HOST_MEM_MB");
+
+		opts.no_huge = true;
+		opts.mem_size = mb != NULL ? atoi(mb) : 1024;
+		opts.hugepage_single_segments = false;
+	}
+	if (spdk_env_init(&opts) < 0) {
+		fprintf(stderr, "Unable to initialize SPDK env\n");
+		return 1;
+	}
+
+	/* Transport select: KV_HOST_TRTYPE=tcp drives NVMe/TCP (for the E810
+	 * over-the-wire Exec test); default stays vfio-user (argv[1] = socket dir). */
+	{
+		const char *tt = getenv("KV_HOST_TRTYPE");
+		if (tt != NULL && (strcasecmp(tt, "tcp") == 0 || strcasecmp(tt, "rdma") == 0)) {
+			const char *a = getenv("KV_HOST_ADDR");
+			const char *p = getenv("KV_HOST_PORT");
+			const char *n = getenv("KV_HOST_NQN");
+			trid.trtype = (strcasecmp(tt, "rdma") == 0) ?
+				SPDK_NVME_TRANSPORT_RDMA : SPDK_NVME_TRANSPORT_TCP;
+			trid.adrfam = SPDK_NVMF_ADRFAM_IPV4;
+			snprintf(trid.traddr, sizeof(trid.traddr), "%s", a ? a : "127.0.0.1");
+			snprintf(trid.trsvcid, sizeof(trid.trsvcid), "%s", p ? p : "4420");
+			snprintf(trid.subnqn, sizeof(trid.subnqn), "%s", n ? n : "");
+			fprintf(stderr, "kv_host: NVMe/%s -> %s:%s nqn=%s\n",
+				tt, trid.traddr, trid.trsvcid, trid.subnqn);
+		} else {
+			trid.trtype = SPDK_NVME_TRANSPORT_VFIOUSER;
+			snprintf(trid.traddr, sizeof(trid.traddr), "%s", argv[1]);
+		}
+	}
+
+	if (spdk_nvme_probe(&trid, &ctx, probe_cb, attach_cb, NULL) != 0 || ctx.ctrlr == NULL) {
+		fprintf(stderr, "spdk_nvme_probe() failed for '%s'\n", trid.traddr);
+		goto out;
+	}
+
+	/* Find the first KV namespace. */
+	for (nsid = spdk_nvme_ctrlr_get_first_active_ns(ctx.ctrlr); nsid != 0;
+	     nsid = spdk_nvme_ctrlr_get_next_active_ns(ctx.ctrlr, nsid)) {
+		struct spdk_nvme_ns *ns = spdk_nvme_ctrlr_get_ns(ctx.ctrlr, nsid);
+
+		if (ns && spdk_nvme_ns_get_csi(ns) == SPDK_NVME_CSI_KV) {
+			ctx.ns = ns;
+			break;
+		}
+	}
+
+	if (ctx.ns == NULL) {
+		fprintf(stderr, "No KV namespace found on controller\n");
+		goto detach;
+	}
+
+	fprintf(stderr, "Found KV namespace nsid=%u\n", spdk_nvme_ns_get_id(ctx.ns));
+
+	kv_ns_data = spdk_nvme_kv_ns_get_data(ctx.ns);
+	if (kv_ns_data == NULL) {
+		fprintf(stderr, "Failed to get KV namespace data\n");
+		goto detach;
+	}
+	fprintf(stderr, "KV format[0]: kvkml=%u kvvml=%u mnks=%u\n",
+		kv_ns_data->kvf[0].kvkml, kv_ns_data->kvf[0].kvvml, kv_ns_data->kvf[0].mnks);
+
+	/* Vendor TTL capability (ADR-0003) is advertised in the KV Identify NS
+	 * vendor-specific capability byte. The shell driver greps for this line. */
+	if (kv_ns_data->vs_cap & SPDK_NVME_KV_NS_VS_CAP_TTL) {
+		fprintf(stderr, "KV TTL capability: SUPPORTED (vs_cap=0x%02x)\n", kv_ns_data->vs_cap);
+	} else {
+		fprintf(stderr, "KV TTL capability: NOT SUPPORTED (vs_cap=0x%02x)\n", kv_ns_data->vs_cap);
+		goto detach;
+	}
+
+	ctx.qpair = spdk_nvme_ctrlr_alloc_io_qpair(ctx.ctrlr, NULL, 0);
+	if (ctx.qpair == NULL) {
+		fprintf(stderr, "Failed to allocate IO qpair\n");
+		goto detach;
+	}
+
+	/* I/O data buffers must live in DMA-registered memory for vfio-user. */
+	store_buf = spdk_dma_zmalloc(buf_len, 0, NULL);
+	retrieve_buf = spdk_dma_zmalloc(buf_len, 0, NULL);
+	list_buf = spdk_dma_zmalloc(buf_len, 0, NULL);
+	if (store_buf == NULL || retrieve_buf == NULL || list_buf == NULL) {
+		fprintf(stderr, "Failed to allocate DMA buffers\n");
+		goto free_qpair;
+	}
+	memcpy(store_buf, g_value, sizeof(g_value));
+
+	/* Store with a vendor TTL via the _ext API (ADR-0003). */
+	struct spdk_nvme_kv_store_ext_opts store_opts;
+	spdk_nvme_kv_store_ext_opts_init(&store_opts, sizeof(store_opts));
+	store_opts.ttl = KV_TEST_TTL_SECONDS;
+	rc = spdk_nvme_kv_store_ext(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				    store_buf, sizeof(g_value), io_complete, &ctx, 0, &store_opts);
+	if (rc != 0) {
+		fprintf(stderr, "spdk_nvme_kv_store_ext submit failed: %d\n", rc);
+		goto free_qpair;
+	}
+	/* In the rados-exec path this Store also round-trips through the OSD, so
+	 * bound it too: a dead/wedged OSD must fail fast here rather than hang. */
+	if ((exec_rados ? wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S)
+	     : wait_for_completion(&ctx)) != 0) {
+		fprintf(stderr, "KV Store failed\n");
+		rc = 1;
+		goto free_qpair;
+	}
+	fprintf(stderr, "KV Store OK (key='%s', %zu value bytes, ttl=%u)\n",
+		g_key, sizeof(g_value), (unsigned)KV_TEST_TTL_SECONDS);
+
+	/*
+	 * KVX-3 rados exec e2e. The librados backend maps KV Exec to rados_aio_exec,
+	 * running an OSD-side object class. The target's allowlist must map:
+	 *   op_id 1 -> binding "kvtest:echo"   (returns the input unchanged)
+	 *   op_id 2 -> binding "kvtest:upcase" (uppercases the stored object value)
+	 * We just stored g_value under g_key; verify both cls methods round-trip
+	 * through the OSD. This proves the cls actually ran server-side.
+	 */
+	/*
+	 * rados-nkvx KV Exec e2e (ADR-0009 / TB1). KV Exec routed to the NEW
+	 * in-process sandboxed executor (binding prefix "nkvx:") that cold-fills the
+	 * object from RADOS and runs a built-in module OFF the SPDK reactor. The
+	 * target's allowlist must map:
+	 *   op_id 10 -> binding "nkvx:bytecount" (result = object length, LE u64)
+	 *   op_id 11 -> binding "nkvx:identity"  (result = object bytes, copied)
+	 * We just stored g_value (sizeof(g_value) bytes) under g_key.
+	 */
+	if (exec_nkvx) {
+		char *exec_buf = spdk_dma_zmalloc(buf_len, 0, NULL);
+		const uint32_t expect_len = (uint32_t)sizeof(g_value);
+
+		if (exec_buf == NULL) {
+			fprintf(stderr, "Failed to allocate exec DMA buffer\n");
+			rc = 1;
+			goto free_qpair;
+		}
+
+		/* --- Criterion 1+3: bytecount built-in via static op_id 10 --- */
+		memset(exec_buf, 0, buf_len);
+		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				       10 /* nkvx:bytecount */, exec_buf, 0,
+				       exec_buf, buf_len, io_complete, &ctx);
+		if (rc != 0 || wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
+			fprintf(stderr, "KV Exec nkvx bytecount failed\n");
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		{
+			uint64_t got = 0;
+
+			memcpy(&got, exec_buf, sizeof(got));
+			if (ctx.last_sc != SPDK_NVME_SC_SUCCESS ||
+			    ctx.last_cdw0 != sizeof(uint64_t) || got != expect_len) {
+				fprintf(stderr,
+					"FAIL: nkvx bytecount sc=0x%02x cdw0=%u got=%" PRIu64
+					" (expected sc=0 cdw0=8 count=%u)\n",
+					ctx.last_sc, ctx.last_cdw0, got, expect_len);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+		}
+		fprintf(stderr,
+			"KV Exec nkvx BYTECOUNT OK: built-in (op_id 10) computed object "
+			"length %u from RADOS object, returned LE u64\n", expect_len);
+
+		/* --- identity built-in via static op_id 11 --- */
+		memset(exec_buf, 0, buf_len);
+		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				       11 /* nkvx:identity */, exec_buf, 0,
+				       exec_buf, buf_len, io_complete, &ctx);
+		if (rc != 0 || wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
+			fprintf(stderr, "KV Exec nkvx identity failed\n");
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		if (ctx.last_sc != SPDK_NVME_SC_SUCCESS || ctx.last_cdw0 != expect_len ||
+		    memcmp(exec_buf, g_value, sizeof(g_value)) != 0) {
+			fprintf(stderr,
+				"FAIL: nkvx identity sc=0x%02x cdw0=%u (expected sc=0 cdw0=%u, "
+				"bytes==stored value)\n", ctx.last_sc, ctx.last_cdw0, expect_len);
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		fprintf(stderr,
+			"KV Exec nkvx IDENTITY OK: built-in (op_id 11) returned the RADOS "
+			"object bytes unchanged (%u bytes)\n", expect_len);
+
+		/* --- Real-wasm bytecount via op_id 12 (nkvx:wasm:bytecount) ---
+		 * Same contract as the bytecount built-in, but the result is computed by
+		 * a REAL precompiled .wasm running OFF the reactor in the dlopen-backed
+		 * wasmtime runtime (ADR-0013). The object bytes are plain-copied into wasm
+		 * linear memory; the module returns the object length as an LE u64. */
+		memset(exec_buf, 0, buf_len);
+		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				       12 /* nkvx:wasm:bytecount */, exec_buf, 0,
+				       exec_buf, buf_len, io_complete, &ctx);
+		if (rc != 0 || wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
+			fprintf(stderr, "KV Exec nkvx wasm bytecount failed\n");
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		{
+			uint64_t got = 0;
+
+			memcpy(&got, exec_buf, sizeof(got));
+			if (ctx.last_sc != SPDK_NVME_SC_SUCCESS ||
+			    ctx.last_cdw0 != sizeof(uint64_t) || got != expect_len) {
+				fprintf(stderr,
+					"FAIL: nkvx wasm bytecount sc=0x%02x cdw0=%u got=%" PRIu64
+					" (expected sc=0 cdw0=8 count=%u). Is libwasmtime.so installed "
+					"and SPDK_NKVX_WASM_DIR set?\n",
+					ctx.last_sc, ctx.last_cdw0, got, expect_len);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+		}
+		fprintf(stderr,
+			"KV Exec nkvx WASM OK: REAL .wasm (op_id 12) computed object length %u "
+			"off-reactor in wasmtime, returned LE u64\n", expect_len);
+
+		/*
+		 * --- TB2 per-invocation caps: a runaway/over-alloc .wasm must be
+		 * CONTAINED (the command is aborted), never crash/hang the target.
+		 * op_id 13 -> nkvx:wasm:fuel_runaway     (compute-runaway; fuel kill)
+		 * op_id 14 -> nkvx:wasm:walltime_runaway (wall-clock-runaway; epoch kill)
+		 * op_id 15 -> nkvx:wasm:overalloc        (memory.grow past cap; contained)
+		 *
+		 * Each Exec must (a) complete (no hang) within the bounded budget and
+		 * (b) report a failure status (NVMe ABORTED_BY_REQUEST for a cap kill;
+		 * any non-SUCCESS for the contained over-alloc). A normal bytecount Exec
+		 * issued AFTER each runaway proves the target is still alive.
+		 */
+		{
+			struct {
+				uint16_t op_id;
+				const char *what;
+				bool expect_aborted;	/* true => require ABORTED sc */
+			} runaways[] = {
+				{ 13, "fuel_runaway (fuel cap)",      true  },
+				{ 14, "walltime_runaway (epoch cap)", true  },
+				{ 15, "overalloc (memory cap)",       false },
+			};
+			size_t k;
+
+			for (k = 0; k < SPDK_COUNTOF(runaways); k++) {
+				int wait_rc;
+
+				memset(exec_buf, 0, buf_len);
+				rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+						       runaways[k].op_id, exec_buf, 0,
+						       exec_buf, buf_len, io_complete, &ctx);
+				/* Bounded wait. A cap kill COMPLETES the command with a
+				 * failure status (wait_rc == -1), which is the SUCCESS path
+				 * for this test: the cap-status assertions below inspect
+				 * ctx.last_sc. Only a real TIMEOUT (wait_rc == -2) means the
+				 * runaway ESCAPED its cap and hung -> hard fail. A submit
+				 * error (rc != 0) is likewise fatal. */
+				wait_rc = (rc == 0)
+					? wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S)
+					: -2;
+				if (rc != 0 || wait_rc == -2) {
+					fprintf(stderr,
+						"FAIL: nkvx %s did not complete (cap escaped / hang)\n",
+						runaways[k].what);
+					spdk_dma_free(exec_buf);
+					rc = 1;
+					goto free_qpair;
+				}
+				if (ctx.last_sc == SPDK_NVME_SC_SUCCESS) {
+					fprintf(stderr,
+						"FAIL: nkvx %s reported SUCCESS (cap did NOT contain it)\n",
+						runaways[k].what);
+					spdk_dma_free(exec_buf);
+					rc = 1;
+					goto free_qpair;
+				}
+				if (runaways[k].expect_aborted &&
+				    ctx.last_sc != SPDK_NVME_SC_ABORTED_BY_REQUEST) {
+					fprintf(stderr,
+						"FAIL: nkvx %s sc=0x%02x (expected ABORTED_BY_REQUEST 0x07)\n",
+						runaways[k].what, ctx.last_sc);
+					spdk_dma_free(exec_buf);
+					rc = 1;
+					goto free_qpair;
+				}
+				fprintf(stderr,
+					"KV Exec nkvx CAP OK: %s contained -> sc=0x%02x (target alive)\n",
+					runaways[k].what, ctx.last_sc);
+
+				/* Liveness re-probe: a normal bytecount Exec must STILL work
+				 * right after the runaway, proving the target did not crash. */
+				memset(exec_buf, 0, buf_len);
+				rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+						       12 /* nkvx:wasm:bytecount */, exec_buf, 0,
+						       exec_buf, buf_len, io_complete, &ctx);
+				if (rc != 0 ||
+				    wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0 ||
+				    ctx.last_sc != SPDK_NVME_SC_SUCCESS) {
+					fprintf(stderr,
+						"FAIL: target not healthy after %s (sc=0x%02x)\n",
+						runaways[k].what, ctx.last_sc);
+					spdk_dma_free(exec_buf);
+					rc = 1;
+					goto free_qpair;
+				}
+			}
+			fprintf(stderr,
+				"KV Exec nkvx CAPS OK: fuel/epoch/memory runaways all contained, "
+				"target still serving normal Execs\n");
+		}
+
+		/*
+		 * --- Criterion 2: off-reactor proof (deterministic, not timing-based).
+		 * Both Execs above ran the module body on the executor's dedicated worker
+		 * thread, NOT the polled SPDK reactor. The target emits a NOTICELOG line
+		 * "nkvx: off-reactor proof ... reactor_tid=0x.. run_tid=0x.. off_reactor=YES"
+		 * for every Exec, capturing the actual OS thread ids. The shell driver
+		 * greps the target log and asserts run_tid != reactor_tid (off_reactor=YES).
+		 * That is the load-bearing evidence; it does not depend on any timing.
+		 */
+
+		spdk_dma_free(exec_buf);
+		fprintf(stderr, "PASS: KV Exec nkvx e2e (off-reactor built-in module ran)\n");
+		rc = 0;
+		goto free_qpair;
+	}
+
+	if (exec_rados) {
+		const char echo_in[] = "near-data-compute";
+		char *exec_buf = spdk_dma_zmalloc(buf_len, 0, NULL);
+		char upper[sizeof(g_value)];
+		size_t j;
+
+		if (exec_buf == NULL) {
+			fprintf(stderr, "Failed to allocate exec DMA buffer\n");
+			rc = 1;
+			goto free_qpair;
+		}
+
+		/* op_id 1 == kvtest:echo: input echoed straight back from the OSD. */
+		memcpy(exec_buf, echo_in, sizeof(echo_in));
+		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				       1 /* kvtest:echo */, exec_buf, sizeof(echo_in),
+				       exec_buf, buf_len, io_complete, &ctx);
+		if (rc != 0 || wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
+			fprintf(stderr, "KV Exec rados echo failed\n");
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		if (memcmp(exec_buf, echo_in, sizeof(echo_in)) != 0) {
+			fprintf(stderr, "KV Exec rados echo MISMATCH: got '%s'\n", exec_buf);
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		fprintf(stderr, "KV Exec rados ECHO OK: OSD cls echoed '%s'\n", exec_buf);
+
+		/* op_id 2 == kvtest:upcase: the OSD reads g_key's stored value
+		 * (g_value, sizeof(g_value) bytes incl. NUL) and returns it uppercased. */
+		for (j = 0; j < sizeof(g_value); j++) {
+			upper[j] = (char)toupper((unsigned char)g_value[j]);
+		}
+		memset(exec_buf, 0, buf_len);
+		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				       2 /* kvtest:upcase */, exec_buf, 0,
+				       exec_buf, buf_len, io_complete, &ctx);
+		if (rc != 0 || wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
+			fprintf(stderr, "KV Exec rados upcase failed\n");
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		if (memcmp(exec_buf, upper, sizeof(g_value)) != 0) {
+			fprintf(stderr, "KV Exec rados upcase MISMATCH:\n  got: '%s'\n  exp: '%s'\n",
+				exec_buf, upper);
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		fprintf(stderr, "KV Exec rados UPCASE OK: OSD cls returned '%s'\n", exec_buf);
+
+		/*
+		 * EXACT-FIT length check (the core of the BUFFER_TOO_SMALL fix). op_id 3
+		 * == kvtest:fixedout returns EXACTLY N bytes where N is the LE uint32 in
+		 * the first 4 input bytes. We ask for N == the host output buffer length,
+		 * so the cls output exactly fills the buffer with NO truncation. Before
+		 * the fix this spuriously reported BUFFER_TOO_SMALL; it must now be
+		 * SUCCESS (sc=0x00) with cdw0 == the buffer length (the true output len),
+		 * and the buffer must hold the deterministic 'A'+(i%26) pattern in full.
+		 */
+		{
+			const uint32_t exact_n = buf_len;       /* fill the buffer exactly */
+			uint32_t hdr;
+			uint32_t i;
+
+			hdr = exact_n;
+			memset(exec_buf, 0, buf_len);
+			memcpy(exec_buf, &hdr, sizeof(hdr));    /* LE uint32 length header */
+			rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+					       3 /* kvtest:fixedout */, exec_buf, sizeof(hdr),
+					       exec_buf, buf_len, io_complete, &ctx);
+			if (rc != 0 ||
+			    wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
+				fprintf(stderr, "KV Exec rados fixedout(exact-fit) failed\n");
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_sc != SPDK_NVME_SC_SUCCESS) {
+				fprintf(stderr, "FAIL: exact-fit exec sc=0x%02x, expected 0x00\n",
+					ctx.last_sc);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_cdw0 != exact_n) {
+				fprintf(stderr,
+					"FAIL: exact-fit exec cdw0=%u, expected %u (true length)\n",
+					ctx.last_cdw0, exact_n);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			for (i = 0; i < exact_n; i++) {
+				if ((unsigned char)exec_buf[i] != (unsigned char)('A' + (i % 26))) {
+					fprintf(stderr,
+						"FAIL: exact-fit exec byte %u = 0x%02x, expected 0x%02x\n",
+						i, (unsigned char)exec_buf[i],
+						(unsigned char)('A' + (i % 26)));
+					spdk_dma_free(exec_buf);
+					rc = 1;
+					goto free_qpair;
+				}
+			}
+			fprintf(stderr,
+				"KV Exec rados EXACT-FIT OK: sc=0x00 cdw0=%u (== buf_len %u), "
+				"full output present, NO spurious BUFFER_TOO_SMALL\n",
+				ctx.last_cdw0, buf_len);
+		}
+
+		/*
+		 * OVER-LARGE (genuine truncation) check. Ask fixedout for MORE bytes than
+		 * the host buffer holds. The command still completes sc=0x00 (the NVMe KV
+		 * BUFFER_TOO_SMALL contract maps to success+CQE length), but cdw0 must now
+		 * carry the TRUE output length (> buf_len), and the first buf_len bytes
+		 * must be present. This proves over-large output is NOT silently reported
+		 * as exact and the host can detect it needs a bigger buffer.
+		 */
+		{
+			const uint32_t big_n = buf_len + 144;   /* genuinely larger than buf */
+			uint32_t hdr;
+			uint32_t i;
+
+			hdr = big_n;
+			memset(exec_buf, 0, buf_len);
+			memcpy(exec_buf, &hdr, sizeof(hdr));
+			rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+					       3 /* kvtest:fixedout */, exec_buf, sizeof(hdr),
+					       exec_buf, buf_len, io_complete, &ctx);
+			if (rc != 0 ||
+			    wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
+				fprintf(stderr, "KV Exec rados fixedout(over-large) failed\n");
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_sc != SPDK_NVME_SC_SUCCESS) {
+				fprintf(stderr, "FAIL: over-large exec sc=0x%02x, expected 0x00\n",
+					ctx.last_sc);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_cdw0 != big_n) {
+				fprintf(stderr,
+					"FAIL: over-large exec cdw0=%u, expected %u (TRUE length > buf)\n",
+					ctx.last_cdw0, big_n);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			for (i = 0; i < buf_len; i++) {
+				if ((unsigned char)exec_buf[i] != (unsigned char)('A' + (i % 26))) {
+					fprintf(stderr,
+						"FAIL: over-large exec byte %u = 0x%02x, expected 0x%02x\n",
+						i, (unsigned char)exec_buf[i],
+						(unsigned char)('A' + (i % 26)));
+					spdk_dma_free(exec_buf);
+					rc = 1;
+					goto free_qpair;
+				}
+			}
+			fprintf(stderr,
+				"KV Exec rados OVER-LARGE OK: sc=0x00 cdw0=%u (TRUE length > buf_len %u), "
+				"first %u bytes present (genuine BUFFER_TOO_SMALL)\n",
+				ctx.last_cdw0, buf_len, buf_len);
+		}
+
+		/*
+		 * >1 MiB (over-cap) regression check for the heap-buffer-overflow fix.
+		 * The OLD backend handed librados a fixed 1 MiB internal buffer; a cls
+		 * emitting more than that over-ran it (ASan: heap-buffer-overflow WRITE
+		 * 1052672 into 1048576-byte alloc). The fix uses rados_read_op_exec, so
+		 * librados ALLOCATES the output buffer to the TRUE length — no fixed
+		 * buffer to over-run. Ask fixedout for 2 MiB while the host buffer stays
+		 * tiny (buf_len): the command must still complete sc=0x00, cdw0 must
+		 * carry the full TRUE length (2 MiB, well past the old 1 MiB threshold),
+		 * the first buf_len bytes must hold the deterministic pattern, and ASan
+		 * must report ZERO overflow. This is the core acceptance case.
+		 */
+		{
+			const uint32_t huge_n = 2u * 1024u * 1024u; /* 2 MiB, > old 1 MiB cap */
+			uint32_t hdr;
+			uint32_t i;
+
+			hdr = huge_n;
+			memset(exec_buf, 0, buf_len);
+			memcpy(exec_buf, &hdr, sizeof(hdr));
+			rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+					       3 /* kvtest:fixedout */, exec_buf, sizeof(hdr),
+					       exec_buf, buf_len, io_complete, &ctx);
+			if (rc != 0 ||
+			    wait_for_completion_timeout(&ctx, KV_RADOS_EXEC_TIMEOUT_S) != 0) {
+				fprintf(stderr, "KV Exec rados fixedout(>1MiB) failed\n");
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_sc != SPDK_NVME_SC_SUCCESS) {
+				fprintf(stderr, "FAIL: >1MiB exec sc=0x%02x, expected 0x00\n",
+					ctx.last_sc);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			if (ctx.last_cdw0 != huge_n) {
+				fprintf(stderr,
+					"FAIL: >1MiB exec cdw0=%u, expected %u (TRUE length, >1MiB)\n",
+					ctx.last_cdw0, huge_n);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			for (i = 0; i < buf_len; i++) {
+				if ((unsigned char)exec_buf[i] != (unsigned char)('A' + (i % 26))) {
+					fprintf(stderr,
+						"FAIL: >1MiB exec byte %u = 0x%02x, expected 0x%02x\n",
+						i, (unsigned char)exec_buf[i],
+						(unsigned char)('A' + (i % 26)));
+					spdk_dma_free(exec_buf);
+					rc = 1;
+					goto free_qpair;
+				}
+			}
+			fprintf(stderr,
+				"KV Exec rados >1MiB OK: sc=0x00 cdw0=%u (TRUE 2MiB output), "
+				"first %u bytes correct, NO overflow (librados-sized buffer)\n",
+				ctx.last_cdw0, buf_len);
+		}
+
+		spdk_dma_free(exec_buf);
+		fprintf(stderr, "PASS: KV Exec rados e2e (OSD-side kvtest cls ran)\n");
+		rc = 0;
+		goto free_qpair;
+	}
+
+	/* Retrieve. */
+	rc = spdk_nvme_kv_retrieve(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				   retrieve_buf, buf_len, io_complete, &ctx, 0);
+	if (rc != 0) {
+		fprintf(stderr, "spdk_nvme_kv_retrieve submit failed: %d\n", rc);
+		goto free_qpair;
+	}
+	if (wait_for_completion(&ctx) != 0) {
+		fprintf(stderr, "KV Retrieve failed\n");
+		rc = 1;
+		goto free_qpair;
+	}
+
+	if (memcmp(retrieve_buf, g_value, sizeof(g_value)) != 0) {
+		fprintf(stderr, "MISMATCH: retrieved value does not match stored value\n");
+		fprintf(stderr, "  stored:    '%s'\n", g_value);
+		fprintf(stderr, "  retrieved: '%s'\n", retrieve_buf);
+		rc = 1;
+		goto free_qpair;
+	}
+
+	fprintf(stderr, "KV Retrieve OK; bytes round-tripped: '%s'\n", retrieve_buf);
+
+	/*
+	 * Slice 2: Exist + Delete. With the key present, Exist must report
+	 * SUCCESS (00h). After Delete, Exist must report KV Key Does Not Exist
+	 * (87h). Each assertion checks the exact NVMe status code from the CQE.
+	 */
+	sc = run_no_data(&ctx, spdk_nvme_kv_exist, "KV Exist (present)");
+	if (sc != SPDK_NVME_SC_SUCCESS) {
+		fprintf(stderr, "FAIL: Exist on present key returned sc=0x%02x, expected 0x00\n", sc);
+		rc = 1;
+		goto free_qpair;
+	}
+	fprintf(stderr, "KV Exist (present) OK: sc=0x00 (SUCCESS)\n");
+
+	sc = run_no_data(&ctx, spdk_nvme_kv_delete, "KV Delete");
+	if (sc != SPDK_NVME_SC_SUCCESS) {
+		fprintf(stderr, "FAIL: Delete of present key returned sc=0x%02x, expected 0x00\n", sc);
+		rc = 1;
+		goto free_qpair;
+	}
+	fprintf(stderr, "KV Delete OK: sc=0x00 (SUCCESS)\n");
+
+	sc = run_no_data(&ctx, spdk_nvme_kv_exist, "KV Exist (absent)");
+	if (sc != SPDK_NVME_SC_KV_KEY_DOES_NOT_EXIST) {
+		fprintf(stderr, "FAIL: Exist on absent key returned sc=0x%02x, expected 0x87\n", sc);
+		rc = 1;
+		goto free_qpair;
+	}
+	fprintf(stderr, "KV Exist (absent) OK: sc=0x87 (KEY_DOES_NOT_EXIST)\n");
+
+	/* A Delete of the now-absent key must also report 87h. */
+	sc = run_no_data(&ctx, spdk_nvme_kv_delete, "KV Delete (absent)");
+	if (sc != SPDK_NVME_SC_KV_KEY_DOES_NOT_EXIST) {
+		fprintf(stderr, "FAIL: Delete of absent key returned sc=0x%02x, expected 0x87\n", sc);
+		rc = 1;
+		goto free_qpair;
+	}
+	fprintf(stderr, "KV Delete (absent) OK: sc=0x87 (KEY_DOES_NOT_EXIST)\n");
+
+	fprintf(stderr, "PASS: KV Store/Retrieve/Exist/Delete sequence succeeded\n");
+
+	/*
+	 * Slice 2 deleted g_key above; the List check below expects g_key to be
+	 * present (expected = NUM_LIST_KEYS + 1), so re-store it before listing.
+	 * Re-store via the vendor _ext API with the TTL so g_key's FINAL state
+	 * carries ttl=KV_TEST_TTL_SECONDS: the shell driver reads it back through
+	 * the kvdev_mem_get_entry RPC after this host process exits (ADR-0003).
+	 */
+	memcpy(store_buf, g_value, sizeof(g_value));
+	spdk_nvme_kv_store_ext_opts_init(&store_opts, sizeof(store_opts));
+	store_opts.ttl = KV_TEST_TTL_SECONDS;
+	rc = spdk_nvme_kv_store_ext(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				    store_buf, sizeof(g_value), io_complete, &ctx, 0, &store_opts);
+	if (rc != 0 || wait_for_completion(&ctx) != 0) {
+		fprintf(stderr, "KV re-store of g_key before List failed\n");
+		rc = 1;
+		goto free_qpair;
+	}
+	fprintf(stderr, "KV re-store of g_key (with TTL) before List OK\n");
+
+	/* Store several more keys, then List them all back. */
+	for (i = 0; i < NUM_LIST_KEYS; i++) {
+		uint8_t klen = (uint8_t)strlen(g_list_keys[i]);
+
+		memset(store_buf, 0, buf_len);
+		store_buf[0] = 'x';
+		rc = spdk_nvme_kv_store(ctx.ns, ctx.qpair, g_list_keys[i], klen,
+					store_buf, 1, io_complete, &ctx, 0);
+		if (rc != 0 || wait_for_completion(&ctx) != 0) {
+			fprintf(stderr, "KV Store of list key '%s' failed\n", g_list_keys[i]);
+			rc = 1;
+			goto free_qpair;
+		}
+	}
+	fprintf(stderr, "Stored %u additional keys for List\n", (unsigned)NUM_LIST_KEYS);
+
+	/* List from the beginning (NULL start key). */
+	memset(list_buf, 0, buf_len);
+	rc = spdk_nvme_kv_list(ctx.ns, ctx.qpair, NULL, 0, list_buf, buf_len,
+			       io_complete, &ctx);
+	if (rc != 0 || wait_for_completion(&ctx) != 0) {
+		fprintf(stderr, "KV List failed\n");
+		rc = 1;
+		goto free_qpair;
+	}
+
+	/* Parse the return data structure: 4-byte NRK, then per key
+	 * { 2-byte KL, key bytes, pad to 4-byte boundary }. Verify every key we
+	 * expect (g_key + the list keys) is present. */
+	{
+		uint32_t nrk, off = 4, found = 0, expected = NUM_LIST_KEYS + 1;
+		const char *all_keys[NUM_LIST_KEYS + 1];
+		uint8_t all_lens[NUM_LIST_KEYS + 1];
+		bool seen[NUM_LIST_KEYS + 1] = { false };
+		uint32_t j;
+
+		/* All keys (g_key and the list keys) are stored with strlen, i.e.
+		 * without the NUL terminator, so List reports them at strlen length.
+		 * This also matches the kvdev_mem_get_entry RPC, which looks up
+		 * g_key by strlen for the TTL round-trip assertion. */
+		all_keys[0] = g_key;
+		all_lens[0] = (uint8_t)strlen(g_key);
+		for (j = 0; j < NUM_LIST_KEYS; j++) {
+			all_keys[j + 1] = g_list_keys[j];
+			all_lens[j + 1] = (uint8_t)strlen(g_list_keys[j]);
+		}
+
+		memcpy(&nrk, list_buf, sizeof(nrk));
+		fprintf(stderr, "KV List returned NRK=%u\n", nrk);
+
+		for (i = 0; i < nrk && off + 2 <= buf_len; i++) {
+			uint16_t kl;
+
+			memcpy(&kl, list_buf + off, sizeof(kl));
+			off += sizeof(kl);
+			if (off + kl > buf_len) {
+				break;
+			}
+			for (j = 0; j < expected; j++) {
+				if (!seen[j] && all_lens[j] == kl &&
+				    memcmp(list_buf + off, all_keys[j], kl) == 0) {
+					seen[j] = true;
+					found++;
+					break;
+				}
+			}
+			/* Advance past the key and pad to the 4-byte boundary. */
+			off += kl;
+			off = (off + 3) & ~3u;
+		}
+
+		if (nrk != expected || found != expected) {
+			fprintf(stderr, "KV List MISMATCH: nrk=%u found=%u expected=%u\n",
+				nrk, found, expected);
+			rc = 1;
+			goto free_qpair;
+		}
+		fprintf(stderr, "KV List OK; all %u keys returned\n", expected);
+	}
+
+	fprintf(stderr, "PASS: KV Store/Retrieve/Exist/Delete/List round-trip succeeded\n");
+
+	/*
+	 * Slice KVX-1/KVX-2: vendor KV Exec over the single bidirectional data
+	 * buffer, gated by the per-namespace allowlist (ADR-0005). Op 1 (ECHO)
+	 * copies the input straight to the output; op 2 (APPEND) appends the input
+	 * to the value stored under the key and returns the new full value. g_key
+	 * currently holds g_value (re-stored before List).
+	 */
+	{
+		const char echo_in[] = "compute-on-storage";
+		const char append_in[] = "+more";
+		char *exec_buf = spdk_dma_zmalloc(buf_len, 0, NULL);
+
+		if (exec_buf == NULL) {
+			fprintf(stderr, "Failed to allocate exec DMA buffer\n");
+			rc = 1;
+			goto free_qpair;
+		}
+
+		/*
+		 * KVX-2 default-deny path: when op-IDs are NOT allowlisted, KV Exec
+		 * must be rejected with INVALID_OPCODE (01h) BEFORE the backend runs.
+		 */
+		if (exec_reject) {
+			ctx.done = false;
+			ctx.failed = false;
+			memcpy(exec_buf, echo_in, sizeof(echo_in));
+			rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+					       1 /* ECHO */, exec_buf, sizeof(echo_in),
+					       exec_buf, buf_len, io_complete, &ctx);
+			if (rc != 0) {
+				fprintf(stderr, "KV Exec (reject phase) submit failed: %d\n", rc);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			while (!ctx.done) {
+				spdk_nvme_qpair_process_completions(ctx.qpair, 0);
+			}
+			if (ctx.last_sct != SPDK_NVME_SCT_GENERIC ||
+			    ctx.last_sc != SPDK_NVME_SC_INVALID_OPCODE) {
+				fprintf(stderr, "KV Exec (reject phase) expected sct=0 sc=0x01, "
+					"got sct=0x%02x sc=0x%02x\n", ctx.last_sct, ctx.last_sc);
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+			spdk_dma_free(exec_buf);
+			fprintf(stderr, "PASS: KV Exec op not in allowlist rejected (sc=0x01)\n");
+			rc = 0;
+			goto free_qpair;
+		}
+
+		/* ECHO: input -> output, key need not matter. */
+		memcpy(exec_buf, echo_in, sizeof(echo_in));
+		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				       1 /* ECHO */, exec_buf, sizeof(echo_in),
+				       exec_buf, buf_len, io_complete, &ctx);
+		if (rc != 0 || wait_for_completion(&ctx) != 0) {
+			fprintf(stderr, "KV Exec ECHO failed\n");
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		if (memcmp(exec_buf, echo_in, sizeof(echo_in)) != 0) {
+			fprintf(stderr, "KV Exec ECHO MISMATCH: got '%s'\n", exec_buf);
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		fprintf(stderr, "KV Exec ECHO OK: output round-tripped '%s'\n", exec_buf);
+
+		/*
+		 * APPEND "+more" to g_key's value (g_value). Expected output is
+		 * g_value followed by "+more" (both without their NUL terminators
+		 * concatenated; strlen(g_value) + strlen(append_in) bytes).
+		 */
+		memset(exec_buf, 0, buf_len);
+		memcpy(exec_buf, append_in, sizeof(append_in));
+		rc = spdk_nvme_kv_exec(ctx.ns, ctx.qpair, g_key, strlen(g_key),
+				       2 /* APPEND */, exec_buf, strlen(append_in),
+				       exec_buf, buf_len, io_complete, &ctx);
+		if (rc != 0 || wait_for_completion(&ctx) != 0) {
+			fprintf(stderr, "KV Exec APPEND failed\n");
+			spdk_dma_free(exec_buf);
+			rc = 1;
+			goto free_qpair;
+		}
+		{
+			/* g_value was stored as sizeof(g_value) bytes (NUL included)
+			 * before List, so the stored value is the string plus its
+			 * terminating NUL; APPEND tacks on strlen(append_in) bytes. The
+			 * new value is therefore g_value (with NUL) followed by the
+			 * appended bytes at offset sizeof(g_value). */
+			uint32_t base = (uint32_t)sizeof(g_value);
+
+			if (memcmp(exec_buf, g_value, strlen(g_value)) != 0 ||
+			    memcmp(exec_buf + base, append_in, strlen(append_in)) != 0) {
+				fprintf(stderr, "KV Exec APPEND MISMATCH\n");
+				spdk_dma_free(exec_buf);
+				rc = 1;
+				goto free_qpair;
+			}
+		}
+		fprintf(stderr, "KV Exec APPEND OK: new value length reported via cdw0\n");
+
+		spdk_dma_free(exec_buf);
+	}
+
+	fprintf(stderr, "PASS: KV Exec (echo + append) round-trip succeeded\n");
+	rc = 0;
+
+free_qpair:
+	spdk_dma_free(store_buf);
+	spdk_dma_free(retrieve_buf);
+	spdk_dma_free(list_buf);
+	spdk_nvme_ctrlr_free_io_qpair(ctx.qpair);
+detach:
+	spdk_nvme_detach(ctx.ctrlr);
+out:
+	spdk_env_fini();
+	return rc;
+}

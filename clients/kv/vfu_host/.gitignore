@@ -1,0 +1,5 @@
+# build outputs (source is committed; binaries/objects are not)
+nkv_vfu_host
+nkv_vfu_gpu
+*.o
+*.d

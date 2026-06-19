@@ -105,9 +105,28 @@ make -j"$(nproc)"
 `--with-rbd` needs `librados`/`librbd` discoverable — from the `ceph` submodule
 build above, system packages, or a Ceph dev install.
 
-This yields `build/lib/libspdk_nvme.a` and friends, the `kvdev_mem` / `kvdev_rados`
-modules, and `test/nvmf/kv_shim/kv_host_shim.{c,h}` — the inputs every other
-component needs.
+This yields `build/lib/libspdk_nvme.a` and friends and the `kvdev_mem` /
+`kvdev_rados` modules — the SPDK inputs every other component links against. The
+KV client/test harness (incl. `kv_host_shim.{c,h}`) now lives in `clients/` (see
+step 1b), no longer inside the SPDK tree.
+
+## 1b. clients — KV host/test harness (Flow B substrate)
+
+The standalone NVMe-KV hosts, the reusable `kv_host_shim`, the `rados-nkv` Rust
+CLI, the vfio-user host, and the WASM Exec modules live in `clients/` and build
+**against the spdk submodule from step 1** (their Makefiles set
+`SPDK_ROOT_DIR := $(CURDIR)/../../spdk`). Build SPDK first, then:
+
+```bash
+make -C clients/kv_shim     # kv_shim_test (+ libfied kv_host_shim)
+make -C clients/kv          # kv_host, kv_ro_host
+make -C clients/kv_rados    # kv_rados_host
+make -C clients/kv/vfu_host # nkv_vfu_host (raw vfio-user client)
+
+# Rust CLI (CPU default; gpu-native feature pulls in hipcc/ROCm). Defaults to the
+# spdk submodule build; override with NKVX_SPDK_BUILD=<spdk>/build.
+cargo build --release --manifest-path clients/kv/rados-nkv/Cargo.toml
+```
 
 ## 2. rocm-xio — Flow A (GPU-initiated)
 
@@ -145,7 +164,7 @@ Point the build at the SPDK tree from step 1:
 cd nixl
 meson setup build \
     -Dspdk_root=$PWD/../spdk \
-    -Dspdk_kv_shim_dir=$PWD/../spdk/test/nvmf/kv_shim \
+    -Dspdk_kv_shim_dir=$PWD/../clients/kv_shim \
     -Drados_nkv_build_test=true
 ninja -C build
 ninja -C build test               # unit suite incl. key-derivation tests
@@ -165,6 +184,8 @@ pip install pyarrow numpy && pip install -e .
 python -m pytest tests/ -v        # exercises the in-memory client
 
 # Native transport against the real target (optional):
+# NOTE: kv_host_shim moved to clients/kv_shim; native/build.sh must locate the
+# shim there (e.g. KV_SHIM_DIR=$PWD/../clients/kv_shim) — see the weights repo.
 SPDK_ROOT=$PWD/../spdk ./native/build.sh   # -> native/libradosnkv_kvshim.so
 ```
 

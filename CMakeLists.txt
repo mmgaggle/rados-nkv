@@ -150,7 +150,7 @@ if(WITH_NIXL)
     SOURCE_DIR "${REPO}/nixl"
     CONFIGURE_COMMAND meson setup build
               -Dspdk_root=${REPO}/spdk
-              -Dspdk_kv_shim_dir=${REPO}/spdk/test/nvmf/kv_shim
+              -Dspdk_kv_shim_dir=${REPO}/clients/kv_shim
               -Drados_nkv_build_test=true
     BUILD_COMMAND ninja -C build
     DEPENDS ${_nixl_deps}
