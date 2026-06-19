@@ -1,3 +1,6 @@
+
+![rados-nkv](./docs/rados-nkv.png)
+
 # ceph-gpu-initiated
 
 **End-to-end demonstration of GPU-initiated NVMe Key-Value I/O to Ceph/RADOS.**

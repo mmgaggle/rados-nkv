@@ -5,3 +5,8 @@
 *~
 .DS_Store
 /scratch/
+
+# Local beads issue tracker (personal; not published)
+.beads/
+CLAUDE.md
+AGENTS.md
