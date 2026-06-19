@@ -47,7 +47,7 @@ executor, the KV client/test harnesses, and the documentation.
 
 | Path | Role |
 |------|------|
-| [`clients/`](clients) | NVMe-KV host & test harnesses — the `kv_host_shim` host consumers link against, the standalone hosts, the `rados-nkv` Rust/HIP CLI, the vfio-user host, WASM Exec modules. Builds against the `spdk` submodule. |
+| [`clients/`](clients) | NVMe-KV host & test harnesses — the `kv_host_shim` the host consumers link against, the standalone hosts, a `rados-nkv` command-line client (Rust/HIP; the ergonomic way to drive the datapath by hand, distinct from this project), the vfio-user host, and WASM Exec modules. Builds against the `spdk` submodule. |
 | [`rados-nkvx/`](rados-nkvx) | The standalone, restartable **Exec executor** (wasmtime sandbox) that runs near-data Exec modules on the storage host. |
 | [`docs/`](docs), [`CMakeLists.txt`](CMakeLists.txt), [`scripts/`](scripts) | Architecture/flow docs, the CMake superbuild + `make` wrapper, and the `rados-nkv` target bring-up helper. |
 
