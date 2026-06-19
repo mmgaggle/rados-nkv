@@ -14,8 +14,7 @@
 #
 # It deliberately STOPS before launching the GPU VM: the GPU run is a one-shot
 # (VM teardown leaves the Strix Halo SMU dirty -> next launch needs a host
-# reboot), so launch it with eyes on it. See captures/gpu-kv-rados-20260611.log
-# and memory large-kv-64mib.md.
+# reboot), so launch it with eyes on it.
 set -euo pipefail
 
 CGI=/home/kyle/src/ceph-gpu-initiated
