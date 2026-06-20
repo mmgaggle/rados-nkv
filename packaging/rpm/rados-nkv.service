@@ -1,0 +1,26 @@
+# rados-nkv.service — NVMe-KV target (front) for the BARE-METAL path.
+# Under cephadm this unit is unused — cephadm generates its own podman-run unit
+# (ADR bead spdk-jhk.14 §3). Both paths share /usr/libexec/rados-nkv/entrypoint.
+[Unit]
+Description=rados-nkv NVMe Key-Value target (front)
+Documentation=https://github.com/mmgaggle/rados-nkv
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=NKV_ROLE=nkv
+# Operator overrides (RPC_SOCK, NVMF_TGT_ARGS, BACKEND, POOL, NQN, VFU_DIR, …).
+EnvironmentFile=-/etc/sysconfig/rados-nkv
+ExecStart=/usr/libexec/rados-nkv/entrypoint
+# The entrypoint traps SIGTERM and stops nvmf_tgt cleanly.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=2
+# nvmf_tgt pins DMA/hugepage memory and (two-tier) verbs resources.
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

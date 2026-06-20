@@ -79,6 +79,50 @@ check-integration:
 	@echo '=== rados-nkvx end-to-end (Mercury + nkvx_service required) ==='
 	$(MAKE) -C rados-nkvx run
 
+# ---- Packaging (RPMs + the in-image datapath spec) -------------------------
+# Modeled on ceph-nvmeof (ADR: bead spdk-jhk.14). Two distinct steps:
+#   export-rpms : SPDK's spdk*/spdk-devel/spdk-scripts RPMs, produced by SPDK's
+#                 OWN spec (spdk/rpmbuild/rpm.sh) — we author zero SPDK spec.
+#   rpm         : our rados-nkv / -libs / -devel, built --build-in-place from
+#                 this checkout (needs a built ./spdk: headers + vendored Mercury).
+# Both land under $(RPM_TOPDIR) (default ~/rpmbuild). `rpms` does both.
+VERSION       := $(shell cat $(CURDIR)/VERSION)
+RPM_RELEASE   ?= 1
+RPM_TOPDIR    ?= $(HOME)/rpmbuild
+# SPDK configure flags must match the superbuild's SPDK build. --with-mercury
+# needs the vendored prefix spelled out (rpmbuild scrubs PKG_CONFIG_PATH).
+SPDK_RPM_CONFIGURE ?= --with-rbd --with-vfio-user \
+                      --with-mercury=$(CURDIR)/spdk/vendor/mercury-install
+# DEPS=no skips SPDK's root-requiring `yum install` of build deps — they're
+# already present (the superbuild built SPDK; in the container an earlier layer
+# installs them). Set DEPS=yes to let rpm.sh install them (needs root).
+SPDK_RPM_DEPS ?= no
+
+.PHONY: export-rpms rpm srpm rpms
+export-rpms:
+	@echo '=== SPDK RPMs via spdk/rpmbuild/rpm.sh ($(SPDK_RPM_CONFIGURE)) ==='
+	BUILDDIR=$(RPM_TOPDIR) DEPS=$(SPDK_RPM_DEPS) \
+	  $(CURDIR)/spdk/rpmbuild/rpm.sh $(SPDK_RPM_CONFIGURE)
+
+rpm:
+	@echo '=== rados-nkv RPMs (version $(VERSION), release $(RPM_RELEASE)) ==='
+	rpmbuild --build-in-place -bb \
+	  --define '_topdir $(RPM_TOPDIR)' \
+	  --define 'checkout $(CURDIR)' \
+	  --define 'version $(VERSION)' \
+	  --define 'release $(RPM_RELEASE)' \
+	  $(CURDIR)/packaging/rpm/rados-nkv.spec
+
+srpm:
+	rpmbuild --build-in-place -bs \
+	  --define '_topdir $(RPM_TOPDIR)' \
+	  --define 'checkout $(CURDIR)' \
+	  --define 'version $(VERSION)' \
+	  --define 'release $(RPM_RELEASE)' \
+	  $(CURDIR)/packaging/rpm/rados-nkv.spec
+
+rpms: export-rpms rpm
+
 .PHONY: distclean
 distclean:
 	rm -rf $(BUILD_DIR)
@@ -98,6 +142,8 @@ help:
 	@echo '  make vm-run-spdk         launch guest wired to the SPDK NVMe-KV target'
 	@echo '  make vm-vfio-rules       install VFIO udev rules (may need sudo)'
 	@echo '  make deps-ceph           install Ceph build deps (may need sudo)'
+	@echo '  make export-rpms         SPDK RPMs via SPDKs own spec (spdk/rpmbuild/rpm.sh)'
+	@echo '  make rpm | rpms          rados-nkv RPMs (rpms = export-rpms + rpm)'
 	@echo '  make distclean           remove $(BUILD_DIR)/'
 	@echo
 	@echo '  components: $(COMPONENTS)'

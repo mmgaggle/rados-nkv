@@ -1,0 +1,22 @@
+# /etc/sysconfig/rados-nkv — environment for rados-nkv.service (front/target).
+# Read by the unit via EnvironmentFile. Uncomment + edit as needed.
+
+# --- nvmf_tgt (the SPDK target daemon) -------------------------------------
+# RPC socket the target listens on (also used by `rados-nkv up`).
+#RPC_SOCK=/var/run/spdk.sock
+# Path to the nvmf_tgt binary (spdk package installs it here).
+#NVMF_TGT=/usr/local/bin/nvmf_tgt
+# Extra nvmf_tgt args. Production: hugepages + a core mask, e.g. "-m 0x1 -s 4096".
+# Hugepage-less dev box: "--no-huge -s 1024".
+#NVMF_TGT_ARGS=-m 0x1 -s 4096
+
+# --- KV target config applied by `rados-nkv up` ----------------------------
+# Backend: rados (real Ceph) | mem (in-memory, no cluster).
+#BACKEND=rados
+#POOL=kvpool
+#CEPH_NS=kvns
+#NQN=nqn.2026-06.io.ceph-gpu:kv
+#VFU_DIR=/var/run/muser/domain/kv
+#CEPH_CONF=/etc/ceph/ceph.conf
+#CEPH_USER=admin
+#READ_ONLY=0

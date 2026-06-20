@@ -1,0 +1,27 @@
+# rados-nkvx.service — Exec executor (per-OSD-host) for the BARE-METAL path.
+# Under cephadm this unit is unused — cephadm generates its own podman-run unit
+# (ADR bead spdk-jhk.14 §3). Both paths share /usr/libexec/rados-nkv/entrypoint.
+[Unit]
+Description=rados-nkvx Exec executor (nkvx_service)
+Documentation=https://github.com/mmgaggle/rados-nkv
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=NKV_ROLE=nkvx
+# Operator overrides (NKVX_LISTEN, NKVX_ADDR_FILE, NKVX_RADOS_POOL, …).
+EnvironmentFile=-/etc/sysconfig/rados-nkvx
+ExecStart=/usr/libexec/rados-nkv/entrypoint
+# nkvx_service installs SIGTERM/SIGINT handlers for a clean drain.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=2
+# The executor brings up Mercury na_ofi over verbs/irdma, which pins regular
+# (non-hugepage) memory via ibv_reg_mr — needs an unbounded memlock.
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

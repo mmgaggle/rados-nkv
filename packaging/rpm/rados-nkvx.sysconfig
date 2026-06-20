@@ -1,0 +1,16 @@
+# /etc/sysconfig/rados-nkvx — environment for rados-nkvx.service (executor).
+# Read by the unit via EnvironmentFile. Uncomment + edit as needed.
+
+# Mercury/NA listen string. Single-host shared-mem: na+sm:// (default).
+# TCP test: ofi+tcp://0.0.0.0:port. Two-tier over RoCE/irdma: ofi+verbs;ofi_rxm://
+#NKVX_LISTEN=na+sm://
+
+# Publish the self-address atomically to this path (front bootstrap, design OQ-8).
+#NKVX_ADDR_FILE=/var/run/rados-nkvx/addr
+
+# RADOS backend for the Slice C5a cold-fill + module run. Absent => C2 skeleton
+# (Exec returns NOT_SUPPORTED).
+#NKVX_RADOS_POOL=kvpool
+#NKVX_RADOS_NAMESPACE=kvns
+#NKVX_RADOS_CONF=/etc/ceph/ceph.conf
+#NKVX_RADOS_USER=admin

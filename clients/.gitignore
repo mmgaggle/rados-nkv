@@ -6,3 +6,6 @@ nvme-kv/kv/kv_host
 nvme-kv/kv/kv_ro_host
 nvme-kv/kv_rados/kv_rados_host
 nvme-kv/kv_shim/kv_shim_test
+
+# in-place shim shared lib (built by packaging/rpm/rados-nkv.spec; see spdk-jhk.19)
+nvme-kv/kv_shim/libkv_host_shim.so*
