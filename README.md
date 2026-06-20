@@ -39,41 +39,8 @@ This repository is the **project home**. It pins the SPDK substrate and every
 component as submodules, and carries the integration glue, the standalone Exec
 executor, the KV client/test harnesses, and the documentation.
 
-## Components
-
-**In this repository:**
-
-| Path | Role |
-|------|------|
-| [`clients/`](clients) | NVMe-KV host & test harnesses — the `kv_host_shim` the host consumers link against, the standalone hosts, the `rkv` command-line client (the `rados-nkv` Rust/HIP crate — the ergonomic way to drive the datapath by hand), and the vfio-user host. Builds against the `spdk` submodule. |
-| [`clients/vllm-weights/`](clients/vllm-weights) | **Host consumer (Flow B).** Model-weights catalog (publisher + loader) over a shared read-only NVMe-KV namespace — the vLLM weights loader. Vendored in-tree. |
-| [`rados-nkvx/`](rados-nkvx) | The standalone, restartable **Exec executor** (wasmtime sandbox) that runs near-data Exec modules on the storage host. |
-| [`docs/`](docs), [`CMakeLists.txt`](CMakeLists.txt), [`scripts/`](scripts) | Architecture/flow docs, the CMake superbuild + `make` wrapper, and the `rados-nkv` target bring-up helper. |
-
-**Pinned submodules:**
-
-| Submodule | Source | Branch | Role |
-|-----------|--------|--------|------|
-| [`spdk`](spdk) | [`mmgaggle/spdk`](https://github.com/mmgaggle/spdk/tree/devel) | `devel` | **The substrate.** NVMe-KV command set, the `kvdev` device layer with `mem` and `rados` (librados) backends, the NVMf KV controller (`ctrlr_kvdev`, CSI=KV namespaces, read-only & Exec gates), and the in-process **KV host shim**. |
-| [`ceph`](ceph) | [`ceph/ceph`](https://github.com/ceph/ceph/tree/tentacle) | `tentacle` | **The storage cluster.** `vstart` a throwaway RADOS cluster for e2e, and provide the `librados` the `rados` kvdev backend links. |
-| [`rocm-xio`](clients/rocm-xio) | [`mmgaggle/rocm-xio`](https://github.com/mmgaggle/rocm-xio/tree/nvme-kv) | `nvme-kv` | **GPU-initiated path.** `nvme-ep --kv-op` — GPU `__device__` code builds the KV SQE, rings the doorbell, polls the CQ; the value lands in host RAM or VRAM. |
-| [`qemu`](clients/vm/qemu) | [`sbates130272/qemu`](https://github.com/sbates130272/qemu) | `dev/stephen/pci-mmio-bridge-submit` | **GPU↔NVMe bridge.** The `pci-mmio-bridge` device forwards the GPU's doorbell MMIO to the SPDK NVMe BAR. |
-| [`qemu-minimal`](clients/vm/qemu-minimal) | [`sbates130272/qemu-minimal`](https://github.com/sbates130272/qemu-minimal) | `main` | **Guest VM tooling.** Cloud-init VM creation + a launcher with GPU `vfio-pci` passthrough, libvfio-user sockets, and the bridge device. |
-| [`nixl`](clients/nixl) | [`mmgaggle/nixl`](https://github.com/mmgaggle/nixl/tree/rados-nkv) | `rados-nkv` | **Host consumer.** The `RADOS_NKV` NIXL backend maps `NIXL_WRITE`/`READ`/`queryMem` onto KV Store/Retrieve/Exist. |
-
-## Documentation
-
-Start with the architecture, then pick a flow:
-
-- [`docs/architecture.md`](docs/architecture.md) — the substrate and every component, layer by layer.
-- [`docs/flow-a-gpu-initiated.md`](docs/flow-a-gpu-initiated.md) — **GPU-initiated** NVMe-KV: GPU → qemu bridge → SPDK → RADOS.
-- [`docs/flow-b-host-consumers.md`](docs/flow-b-host-consumers.md) — **host-side** NIXL and weights consumers over the same target.
-- [`docs/build.md`](docs/build.md) — build order and per-component build commands (incl. `clients/` and `rados-nkvx/`).
-- [`docs/demo-e2e.md`](docs/demo-e2e.md) — step-by-step bring-up of the full end-to-end path.
-
-The [`scripts/rados-nkv`](scripts/rados-nkv) helper brings the SPDK NVMe-KV target
-up or down with one command (`up` / `down` / `status`). `--mem` selects the
-no-Ceph in-memory backend; `--read-only` creates a loader-style namespace.
+A component-by-component breakdown — the in-repo paths, the pinned submodules,
+and the documentation index — is in [`docs/architecture.md`](docs/architecture.md).
 
 ## Getting the code
 
@@ -111,6 +78,43 @@ make vm / vm-run         # build + launch the ROCm guest image (Flow A)
 Build a subset with `make configure CMAKE_ARGS='-DWITH_QEMU=OFF'` then `make build`;
 `make help` lists every target. Full details — including the manual per-component
 commands — are in [`docs/build.md`](docs/build.md).
+
+## Container image (Podman)
+
+The datapath ships as a single multi-stage image
+([`packaging/container/Dockerfile`](packaging/container/Dockerfile)) — one image,
+two roles, dispatched at run time on `$NKV_ROLE` (`nkv` = front/target,
+`nkvx` = Exec executor). The `builder` stage reproduces the validated host build
+(vendored Mercury + wasmtime, SPDK `--with-rbd --with-vfio-user`, `rados-nkvx`)
+and `rpmbuild`s the RPMs; the thin `runtime` stage just installs them. Ceph is
+**not** built — SPDK links the distro's `librados-devel`.
+
+The build context must carry the `spdk` submodule populated **recursively**:
+
+```bash
+git submodule update --init --recursive spdk
+podman build -f packaging/container/Dockerfile -t rados-nkv:devel .
+```
+
+Prefer the helper, which stamps the ceph-nvmeof-style tag from [`VERSION`](VERSION)
+(`<registry>/rados-nkv:devel_v<semver>`, plus a floating `:devel`):
+
+```bash
+packaging/container/build.sh              # build only
+packaging/container/build.sh --push       # build + push
+
+# knobs (env):
+REGISTRY=quay.io/ceph \
+CEPH_RELEASE=tentacle_9.2 \   # release label baked into the tag prefix
+ENGINE=podman \               # podman | docker
+  packaging/container/build.sh
+```
+
+Run a role by setting `NKV_ROLE` (there is no safe default):
+
+```bash
+podman run --rm -e NKV_ROLE=nkv rados-nkv:devel
+```
 
 ## License
 
