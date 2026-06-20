@@ -49,3 +49,4 @@ htmlcov/
 # Native NVMe-KV shim build artifacts (built by native/build.sh)
 native/*.so
 native/*.o
+.venv-rocm
