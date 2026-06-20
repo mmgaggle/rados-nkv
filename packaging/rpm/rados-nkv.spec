@@ -102,15 +102,10 @@ building host consumers against libkv_host_shim.
 make -C %{checkout}/rados-nkvx %{?_smp_mflags} \
      MERCURY_PREFIX=%{checkout}/spdk/vendor/mercury-install
 
-# Host shim shared library. kv_host_shim today only builds INTO kv_shim_test via
-# SPDK's app-mk; there is no .so target. Build one here as PIC against the SPDK
-# nvme libs. VALIDATE the link list in-container (tracked: shim-shared-lib bead)
-# — spdk_nvme + its sock/vmd deps may need expansion depending on the SPDK build.
-cc -shared -fPIC -Wl,-soname,%{shim_soname}.0 \
-   -I %{checkout}/spdk/include \
-   -o %{checkout}/clients/nvme-kv/kv_shim/%{shim_ver} \
-   %{checkout}/clients/nvme-kv/kv_shim/kv_host_shim.c \
-   $(PKG_CONFIG_PATH=%{checkout}/spdk/build/lib/pkgconfig pkg-config --cflags --libs spdk_nvme 2>/dev/null || echo -L%{checkout}/spdk/build/lib -lspdk_nvme)
+# Host shim shared library (libkv_host_shim.so) — built by the kv_shim Makefile's
+# `shared` target (PIC, linked against the installed SPDK nvme stack via
+# spdk_nvme.pc). Lands at clients/nvme-kv/kv_shim/%{shim_ver}.
+make -C %{checkout}/clients/nvme-kv/kv_shim shared SHIM_VERSION=%{version}
 
 # Stage license/doc into the build CWD so %license can find them — but only if
 # CWD isn't already the checkout (rpm 6 in-place builds there; -ef guards the
