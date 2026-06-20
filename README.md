@@ -4,8 +4,8 @@
 # RADOS-NKV
 
 Exposes [RADOS](https://ceph.io/assets/pdfs/weil-rados-pdsw07.pdf), a reliable object storage service through the NVMe key-value
-command set. Supports host or GPU initiated IO or /computation/, and data
-bypasses the CPU with peer-to-peer DMA. A fast KV store for AI.
+command set. Supports host or GPU initiated IO and _computation_. Data bypasses
+the CPU with peer-to-peer DMA. A fast KV store for AI.
 
 RADOS-NKV exposes Ceph/RADOS through the **NVMe Key-Value command set**. A
 target presents KV namespaces with a sandboxed near-data pluggable execution
