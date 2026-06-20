@@ -1,0 +1,5 @@
+# build outputs (source is committed; binaries/objects are not)
+gpu_direct_probe
+gpu_direct_dmamap
+*.o
+*.d
