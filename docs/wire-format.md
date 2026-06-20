@@ -61,12 +61,28 @@ Retrieve, the data buffer is described as an SGL: the leading segment carries th
 `[u16 key_len][key]` (host → device) and the value is returned into the following
 segment(s) (device → host).
 
+**Why in-payload.** The NVMe-KV standard carries the key *inline in the command*
+and therefore caps it at 16 bytes: a command with Key Length > 16 is aborted with
+*Invalid Field in Command*. The standard does **not** define how to transport a
+longer key — it explicitly leaves that to a future "alternative mechanism." This
+length-prefixed payload encoding is RADOS-NKV's choice of that mechanism, and it
+is no less standard-conformant than any other vendor's long-key extension (e.g.
+Samsung's separate host key buffer) — there is simply no standard above 16 bytes
+to conform to. RADOS-NKV unifies on the in-payload form because it reuses the Exec
+decode path and avoids a second DMA for the key (which matters on the kLLM hot
+path, where keys are >16-byte content hashes).
+
 ### Length bounds
 
 | Bound            | Value |
 |------------------|-------|
 | Minimum key      | 1     |
 | Maximum key      | 255   |
+
+The 255-byte maximum is the **NVMe-KV standard's architectural Key Length limit**
+(the Key Length field is 8 bits wide), not a RADOS-NKV- or Samsung-specific
+number. Any conforming implementation that supports long keys tops out at the same
+value.
 
 ## Values
 
@@ -181,3 +197,10 @@ unmodified. Keys of 17–255 bytes are a RADOS-NKV capability — such a client 
 simply limited to 16-byte keys. The only place it can observe longer keys is a
 List of a namespace that contains them, since list entries carry a `u16` length
 per key; it cannot create or address keys it did not write.
+
+Because the standard defines **no transport for keys above 16 bytes** (it caps
+inline keys at 16 and leaves longer keys to a vendor-defined mechanism), long-key
+interoperability is inherently *per-vendor*, not a standard guarantee. Adopting
+another vendor's long-key encoding (e.g. Samsung's) would buy interop with that
+vendor's hardware specifically — not standard portability, which does not exist
+above 16 bytes.
