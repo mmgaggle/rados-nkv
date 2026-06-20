@@ -280,6 +280,7 @@ def iter_named_tensors_gpu(
     *,
     manifest: Optional[WeightManifest] = None,
     keep_buffers: Optional[list] = None,
+    verify: bool = False,
 ) -> Iterator[Tuple[str, "object"]]:
     """GPU-direct variant of :func:`iter_named_tensors`.
 
@@ -326,6 +327,8 @@ def iter_named_tensors_gpu(
     # Per-process cache of distinct Values already Retrieved into GPU regions, so
     # a packed Value shared by several tensors is fetched once.
     gpu_values: Dict[bytes, "object"] = {}
+    if keep_buffers is None:
+        keep_buffers = []
 
     def _retrieve_value_gpu(key: bytes):
         """Retrieve the whole Value for ``key`` into a fresh GPU dma-buf region.
@@ -339,9 +342,13 @@ def iter_named_tensors_gpu(
         # value length, reported via cdw0). Fall back to the catalog default cap.
         buf_len = kv.max_value_len
         gbuf = kvg.alloc_buf(buf_len)
+        # Register for cleanup IMMEDIATELY — before the Retrieve (or a later
+        # tensor) can fail and strand this region. With one SPDK env per process a
+        # leaked hipMalloc+dma-buf+DMA-region is unrecoverable. GpuBuf.free() is
+        # idempotent, and the caller frees keep_buffers in its finally.
+        keep_buffers.append(gbuf)
         rc, true_len = kvg.retrieve_gpu(key, gbuf)
         if rc != 0:
-            gbuf.free()
             from .loader import MissingChunkError
 
             if rc == 0x87:
@@ -350,11 +357,21 @@ def iter_named_tensors_gpu(
                     f"returned KEY_DOES_NOT_EXIST)"
                 )
             raise OSError(f"GPU Retrieve failed for key {key.hex()}: rc={rc}")
+        if verify:
+            # Opt-in content-integrity check: re-hash the retrieved bytes (D2H)
+            # against the content-addressed key, matching the host path's
+            # guarantee. Defeats the no-copy benefit, so it is off by default.
+            from .keys import chunk_key
+            from .loader import IntegrityError
+
+            host = gbuf.copy_to_host(true_len)
+            if chunk_key(host) != key:
+                raise IntegrityError(
+                    f"GPU-path integrity check failed for value {key.hex()}: "
+                    f"retrieved bytes hash to {chunk_key(host).hex()}"
+                )
         gpu_values[key] = (gbuf, true_len)
         return gbuf, true_len
-
-    if keep_buffers is None:
-        keep_buffers = []
 
     for name in manifest.tensors(precision=precision):
         dtype_str, shape, _sizes = manifest.tensor_meta(name, precision)
@@ -374,8 +391,20 @@ def iter_named_tensors_gpu(
                     f"slice size {size} for tensor {name!r} exceeds retrieved "
                     f"value length {true_len} for key {key.hex()}"
                 )
+            # Symmetric with the packed path's numel check: the slice byte count
+            # must equal the tensor's expected bytes, so _wrap's floor division
+            # (count = nbytes // itemsize) can't silently mis-size.
+            itemsize = torch.empty(0, dtype=dt).element_size()
+            nelem = 1
+            for d in shape:
+                nelem *= d
+            if size != nelem * itemsize:
+                raise ValueError(
+                    f"slice size {size} for tensor {name!r} != expected "
+                    f"{nelem * itemsize} bytes (shape {tuple(shape)} "
+                    f"dtype {dtype_str})"
+                )
             tensor = _wrap_gpu_buf_as_tensor(torch, gbuf.dptr, size, dt, shape)
-            keep_buffers.append(gbuf)
             yield name, tensor
             continue
 
@@ -405,16 +434,10 @@ def iter_named_tensors_gpu(
         tensor = flat.reshape(tuple(shape)) if shape else flat.reshape(())
         yield name, tensor
 
-    # NOTE: the shared/packed-Value GPU regions in gpu_values back the directly
-    # wrapped (unpacked) tensors, so the caller must keep them alive via
-    # keep_buffers until model.load_weights has consumed the iterator. The
-    # concat path .clone()s into a fresh tensor, so those regions could be freed
-    # earlier, but we keep the lifetime uniform and let the caller free all of
-    # keep_buffers + gpu_values after consumption.
-    for key in list(gpu_values):
-        gbuf, _ = gpu_values[key]
-        if gbuf not in keep_buffers:
-            keep_buffers.append(gbuf)
+    # Every GPU region is registered into keep_buffers at creation
+    # (_retrieve_value_gpu), so there is nothing to sweep here: the caller frees
+    # all of keep_buffers after model.load_weights has consumed the iterator,
+    # including any region allocated for a tensor that errored mid-stream.
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +676,8 @@ def make_loader_cls():
 
             try:
                 weights = iter_named_tensors_gpu(
-                    kvg, kv, revision, precision, keep_buffers=keep
+                    kvg, kv, revision, precision, keep_buffers=keep,
+                    verify=bool(extra.get("rados_nkv_gpu_verify")),
                 )
                 model.load_weights(weights)
             finally:

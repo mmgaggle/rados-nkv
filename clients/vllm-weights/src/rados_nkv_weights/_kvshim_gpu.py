@@ -24,6 +24,7 @@ GPU-direct path), never by the package ``__init__``. Importing it without the
 
 import ctypes
 import os
+import weakref
 from typing import Optional, Tuple
 
 #: NVMe-KV logical status: the requested key is not present.
@@ -145,7 +146,16 @@ class GpuBuf:
         self._lib = lib
         self._raw = raw  # struct kvg_gpu_buf *
         self.size = size
-        self._closed = False
+        # GC backstop: frees the C region exactly once — on explicit free() OR
+        # when an abandoned GpuBuf is collected. weakref.finalize is single-shot
+        # and holds no ref to self (so it never blocks collection), which also
+        # makes a C double-free unreachable. Frees hipMalloc + dma-buf fd + the
+        # vfio-user DMA region (all owned by struct kvg_gpu_buf).
+        self._finalizer = weakref.finalize(self, lib.kvg_buf_free, raw)
+
+    @property
+    def _closed(self) -> bool:
+        return not self._finalizer.alive
 
     @property
     def dptr(self) -> int:
@@ -165,11 +175,7 @@ class GpuBuf:
         return bytes(out)
 
     def free(self) -> None:
-        if self._closed:
-            return
-        self._lib.kvg_buf_free(self._raw)
-        self._closed = True
-        self._raw = None
+        self._finalizer()  # idempotent single-shot (no-op if already freed)
 
 
 class KvgHandle:
@@ -183,7 +189,12 @@ class KvgHandle:
     def __init__(self, lib: ctypes.CDLL, raw: int) -> None:
         self._lib = lib
         self._raw = raw  # struct kvg_dev *
-        self._closed = False
+        # GC backstop, single-shot (see GpuBuf). Closes the controller + SPDK env.
+        self._finalizer = weakref.finalize(self, lib.kvg_close, raw)
+
+    @property
+    def _closed(self) -> bool:
+        return not self._finalizer.alive
 
     @classmethod
     def open(cls, vfu_addr: str) -> "KvgHandle":
@@ -220,11 +231,7 @@ class KvgHandle:
         return rc, int(got.value)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._lib.kvg_close(self._raw)
-        self._closed = True
-        self._raw = None
+        self._finalizer()  # idempotent single-shot (no-op if already closed)
 
     def __enter__(self) -> "KvgHandle":
         return self
