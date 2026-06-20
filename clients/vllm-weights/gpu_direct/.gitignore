@@ -3,3 +3,4 @@ gpu_direct_probe
 gpu_direct_dmamap
 *.o
 *.d
+*.so

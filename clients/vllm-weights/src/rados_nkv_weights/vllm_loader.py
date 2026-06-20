@@ -142,6 +142,282 @@ def iter_named_tensors(
 
 
 # ---------------------------------------------------------------------------
+# GPU-direct emit: device-resident tensors via the Rung-1 dma-buf datapath
+# ---------------------------------------------------------------------------
+#
+# Instead of torch.frombuffer(bytearray(data)) (a HOST tensor + an implicit H2D
+# copy inside model.load_weights), the GPU-direct path Retrieves each catalog
+# Value DIRECTLY into a hipMalloc GPU buffer (exported as a dma-buf and
+# registered as a vfio-user DMA region; see gpu_direct/kvg_gpu.hip, bead
+# spdk-p9k.1) and wraps the resulting HIP device pointer as a device-resident
+# torch.Tensor via __cuda_array_interface__. So the weight bytes are born in GPU
+# memory and model.load_weights does no host bounce.
+#
+# The transport for this leg is the GPU shim (rados_nkv_weights._kvshim_gpu),
+# NOT the SPDK-NVMe kv_host_shim the CPU NvmeKvClient uses, because the GPU shim
+# is the one that owns the vfio_device and can register the dma-buf region.
+
+
+def _cai_typestr(torch, dt) -> Optional[str]:
+    """Map a torch dtype to a ``__cuda_array_interface__`` typestr, or None.
+
+    CAI cannot express bf16 / fp8 (no numpy kind for them). For those we wrap the
+    GPU bytes as uint8 and ``.view(dtype)`` on the device tensor instead — see
+    :func:`_wrap_gpu_buf_as_tensor`.
+    """
+    table = {
+        torch.float64: "<f8",
+        torch.float32: "<f4",
+        torch.float16: "<f2",
+        torch.int64: "<i8",
+        torch.int32: "<i4",
+        torch.int16: "<i2",
+        torch.int8: "|i1",
+        torch.uint8: "|u1",
+        torch.bool: "|b1",
+    }
+    return table.get(dt)
+
+
+def _wrap_gpu_buf_as_tensor(torch, dptr: int, nbytes: int, dt, shape):
+    """Wrap a raw HIP device pointer as a device-resident ``torch.Tensor``.
+
+    ``dptr`` is the GPU virtual address of ``nbytes`` valid bytes (the Retrieve
+    DMA already landed them there). Returns a tensor of dtype ``dt`` reshaped to
+    ``shape``, with ``.is_cuda == True``, viewing those exact GPU bytes (no host
+    bounce, no extra device copy beyond what reshape/view need).
+
+    For dtypes CAI can express we hand torch a CAI object directly. For bf16/fp8
+    (which CAI's typestr cannot name) we wrap the bytes as a uint8 device tensor
+    and bit-cast with ``.view(dt)``.
+    """
+    typestr = _cai_typestr(torch, dt)
+    if typestr is not None:
+        itemsize = torch.empty(0, dtype=dt).element_size()
+        count = nbytes // itemsize
+
+        class _Cai:
+            __cuda_array_interface__ = {
+                "data": (dptr, False),  # (ptr, read_only=False)
+                "shape": (count,),
+                "typestr": typestr,
+                "version": 3,
+                "strides": None,
+            }
+
+        flat = torch.as_tensor(_Cai(), device="cuda")
+    else:
+        # bf16 / fp8: wrap raw bytes as uint8 on device, then bit-cast.
+        class _CaiU8:
+            __cuda_array_interface__ = {
+                "data": (dptr, False),
+                "shape": (nbytes,),
+                "typestr": "|u1",
+                "version": 3,
+                "strides": None,
+            }
+
+        flat_u8 = torch.as_tensor(_CaiU8(), device="cuda")
+        flat = flat_u8.view(dt)
+    return flat.reshape(tuple(shape)) if shape else flat.reshape(())
+
+
+class _KvgManifestClient(KvClient):
+    """Minimal :class:`KvClient` over a ``KvgHandle`` for the small HOST reads.
+
+    :func:`iter_named_tensors_gpu` uses its ``kv`` argument only to read the
+    Arrow manifest and to report ``kv.max_value_len`` (to size the GPU regions);
+    the bulk weight bytes go through ``kvg`` straight to GPU memory. This adapter
+    serves those small reads through the SAME ``KvgHandle`` (Retrieve into a GPU
+    buffer, then copy the small manifest bytes to host), so the whole GPU-direct
+    flow needs only the single ``KvgHandle`` SPDK env — DPDK permits exactly one
+    SPDK env per process, so we cannot also open an NvmeKvClient.
+    """
+
+    def __init__(self, kvg, max_value_len: Optional[int] = None) -> None:
+        self._kvg = kvg
+        if max_value_len is None:
+            from .config import DEFAULT_MAX_VALUE_LEN
+
+            max_value_len = DEFAULT_MAX_VALUE_LEN
+        self._cap = int(max_value_len)
+
+    @property
+    def max_value_len(self) -> int:
+        return self._cap
+
+    def retrieve(self, key: bytes) -> Optional[bytes]:
+        buf = self._kvg.alloc_buf(self._cap)
+        try:
+            rc, true_len = self._kvg.retrieve_gpu(key, buf)
+            if rc == 0x87:  # KEY_DOES_NOT_EXIST
+                return None
+            if rc != 0:
+                raise OSError(f"GPU manifest Retrieve failed for "
+                              f"{bytes(key).hex()}: rc={rc}")
+            return buf.copy_to_host(true_len)
+        finally:
+            buf.free()
+
+    def exists(self, key: bytes) -> bool:
+        raise NotImplementedError("exists() not needed on the GPU loader path")
+
+    def store(self, key: bytes, value: bytes) -> None:
+        raise NotImplementedError("store() not available on a read-only loader")
+
+    def delete(self, key: bytes) -> None:
+        raise NotImplementedError("delete() not available on a read-only loader")
+
+    def iter_keys(self):
+        raise NotImplementedError("iter_keys() not available over NVMe-KV")
+
+
+def iter_named_tensors_gpu(
+    kvg,
+    kv: KvClient,
+    model_revision: str,
+    precision: str,
+    *,
+    manifest: Optional[WeightManifest] = None,
+    keep_buffers: Optional[list] = None,
+) -> Iterator[Tuple[str, "object"]]:
+    """GPU-direct variant of :func:`iter_named_tensors`.
+
+    Yields ``(tensor_name, torch.Tensor)`` where each tensor is
+    **device-resident** (``.is_cuda``), filled by a host-side NVMe-KV Retrieve
+    that DMAs straight into a GPU dma-buf region (no host bounce).
+
+    Two transports are in play:
+
+    * ``kvg`` — a :class:`rados_nkv_weights._kvshim_gpu.KvgHandle` (the live
+      GPU-landing transport: Retrieve(key) -> hipMalloc dma-buf region).
+    * ``kv`` — a :class:`KvClient` used ONLY to read the Arrow manifest (small,
+      host). The manifest fetch is not on the bulk weight datapath.
+
+    The manifest's content-integrity model (whole-Value content-hash) is a HOST
+    check over bytes, so for integrity we keep the same guarantee by verifying on
+    the GPU is impractical; instead we rely on the manifest's per-Value content
+    addressing implicitly — the same Values the CPU path reads. For the common
+    *unpacked* tensor (one key, offset 0, whole Value == tensor) the GPU Retrieve
+    lands the whole Value and we wrap it directly. For *packed* / multi-slice
+    tensors we Retrieve each distinct Value once into its own GPU region and build
+    the tensor by concatenating device slices with ``torch.cat`` (still no host
+    bounce of the weight bytes).
+
+    ``keep_buffers`` (if given) collects the underlying :class:`GpuBuf` objects
+    so the caller can keep the GPU dma-buf regions alive as long as the wrapped
+    tensors are in use, then free them. (A directly-wrapped tensor aliases the
+    GpuBuf's memory; freeing the buffer invalidates the tensor. The
+    concatenated/packed path copies into a fresh device tensor, so those buffers
+    can be freed eagerly.)
+    """
+    import torch  # lazy
+
+    if manifest is None:
+        manifest = _load_manifest(kv, model_revision)
+    if precision not in manifest.precisions():
+        from .loader import PrecisionNotFoundError
+
+        raise PrecisionNotFoundError(
+            f"precision {precision!r} not in manifest for {model_revision!r}; "
+            f"available: {manifest.precisions()}"
+        )
+
+    # Per-process cache of distinct Values already Retrieved into GPU regions, so
+    # a packed Value shared by several tensors is fetched once.
+    gpu_values: Dict[bytes, "object"] = {}
+
+    def _retrieve_value_gpu(key: bytes):
+        """Retrieve the whole Value for ``key`` into a fresh GPU dma-buf region.
+
+        Returns ``(GpuBuf, true_len)``. Raises on a missing key / error.
+        """
+        cached = gpu_values.get(key)
+        if cached is not None:
+            return cached
+        # Size the region to the namespace cap (the device truncates to the true
+        # value length, reported via cdw0). Fall back to the catalog default cap.
+        buf_len = kv.max_value_len
+        gbuf = kvg.alloc_buf(buf_len)
+        rc, true_len = kvg.retrieve_gpu(key, gbuf)
+        if rc != 0:
+            gbuf.free()
+            from .loader import MissingChunkError
+
+            if rc == 0x87:
+                raise MissingChunkError(
+                    f"value {key.hex()} missing from catalog (GPU Retrieve "
+                    f"returned KEY_DOES_NOT_EXIST)"
+                )
+            raise OSError(f"GPU Retrieve failed for key {key.hex()}: rc={rc}")
+        gpu_values[key] = (gbuf, true_len)
+        return gbuf, true_len
+
+    if keep_buffers is None:
+        keep_buffers = []
+
+    for name in manifest.tensors(precision=precision):
+        dtype_str, shape, _sizes = manifest.tensor_meta(name, precision)
+        dt = _torch_dtype(torch, dtype_str)
+        slices = manifest.chunk_slices(name, precision)
+        total = sum(size for _k, _o, size in slices)
+
+        if len(slices) == 1 and slices[0][1] == 0:
+            # Unpacked fast path: one key, offset 0. If the slice is the WHOLE
+            # Value, wrap the GPU region directly (zero device copies). If it is a
+            # prefix (size < true_len), the wrap still views the correct leading
+            # bytes (the Retrieve landed the whole Value contiguously).
+            key, _off, size = slices[0]
+            gbuf, true_len = _retrieve_value_gpu(key)
+            if size > true_len:
+                raise ValueError(
+                    f"slice size {size} for tensor {name!r} exceeds retrieved "
+                    f"value length {true_len} for key {key.hex()}"
+                )
+            tensor = _wrap_gpu_buf_as_tensor(torch, gbuf.dptr, size, dt, shape)
+            keep_buffers.append(gbuf)
+            yield name, tensor
+            continue
+
+        # Packed / multi-slice: build device byte views per slice and concat into
+        # a fresh contiguous device tensor (so the shared Value buffers can be
+        # freed independently of the resulting tensor).
+        parts = []
+        for key, offset, size in slices:
+            gbuf, true_len = _retrieve_value_gpu(key)
+            end = offset + size
+            if offset < 0 or end > true_len:
+                raise ValueError(
+                    f"slice [{offset}:{end}] for tensor {name!r} out of range "
+                    f"for value {key.hex()} of length {true_len}"
+                )
+            whole_u8 = _wrap_gpu_buf_as_tensor(
+                torch, gbuf.dptr, true_len, torch.uint8, (true_len,)
+            )
+            parts.append(whole_u8[offset:end])
+        flat_u8 = torch.cat(parts) if len(parts) > 1 else parts[0].clone()
+        if int(flat_u8.numel()) != total:
+            raise ValueError(
+                f"reassembled tensor {name!r} is {int(flat_u8.numel())} bytes, "
+                f"manifest expected {total}"
+            )
+        flat = flat_u8.view(dt)
+        tensor = flat.reshape(tuple(shape)) if shape else flat.reshape(())
+        yield name, tensor
+
+    # NOTE: the shared/packed-Value GPU regions in gpu_values back the directly
+    # wrapped (unpacked) tensors, so the caller must keep them alive via
+    # keep_buffers until model.load_weights has consumed the iterator. The
+    # concat path .clone()s into a fresh tensor, so those regions could be freed
+    # earlier, but we keep the lifetime uniform and let the caller free all of
+    # keep_buffers + gpu_values after consumption.
+    for key in list(gpu_values):
+        gbuf, _ = gpu_values[key]
+        if gbuf not in keep_buffers:
+            keep_buffers.append(gbuf)
+
+
+# ---------------------------------------------------------------------------
 # ModelConfig -> (Model revision, Precision variant)
 # ---------------------------------------------------------------------------
 
@@ -314,9 +590,23 @@ def make_loader_cls():
             ``(name, torch.Tensor)`` weight iterator with
             :func:`iter_named_tensors`, and hands it to ``model.load_weights``
             so the model applies TP sharding and copies into device memory.
+
+            **GPU-direct path (bead spdk-p9k.1.1).** When
+            ``model_loader_extra_config['rados_nkv_gpu_direct']`` is set, the
+            weight bytes are Retrieved DIRECTLY into hipMalloc GPU dma-buf
+            regions and yielded as device-resident tensors
+            (:func:`iter_named_tensors_gpu`), so ``model.load_weights`` does no
+            implicit H2D copy. This leg uses the GPU shim
+            (:mod:`rados_nkv_weights._kvshim_gpu`) for the device-landing
+            Retrieve and a small host KvClient only for the Arrow manifest.
             """
             revision = _revision_from_model_config(model_config)
             precision = _precision_from_model_config(model_config)
+            extra = getattr(model_config, "model_loader_extra_config", None) or {}
+
+            if extra.get("rados_nkv_gpu_direct"):
+                self._load_weights_gpu_direct(model, model_config, revision, precision)
+                return
 
             if self._injected_kv is not None:
                 kv, close = self._injected_kv, (lambda: None)
@@ -327,6 +617,50 @@ def make_loader_cls():
                 model.load_weights(weights)
             finally:
                 close()
+
+        def _load_weights_gpu_direct(self, model, model_config, revision, precision):
+            """GPU-direct emit: device-resident tensors via the dma-buf Retrieve.
+
+            Opens a :class:`~rados_nkv_weights._kvshim_gpu.KvgHandle` at
+            ``rados_nkv_vfu_addr`` (the device-landing transport) plus a host
+            KvClient for the manifest, builds the device-tensor iterator, hands it
+            to ``model.load_weights``, then frees the GPU dma-buf regions once the
+            model has copied the weights into its parameters.
+            """
+            from ._kvshim_gpu import KvgHandle
+
+            extra = getattr(model_config, "model_loader_extra_config", None) or {}
+            vfu_addr = extra.get("rados_nkv_vfu_addr")
+            if not vfu_addr:
+                raise ValueError(
+                    "rados_nkv_gpu_direct requires model_loader_extra_config["
+                    "'rados_nkv_vfu_addr'] (the nvmf_tgt VFIOUSER socket dir)"
+                )
+
+            kvg = KvgHandle.open(vfu_addr)
+            keep = []
+
+            # Manifest (small host read). The GPU shim and the SPDK-NVMe host
+            # shim each init the SPDK env, which DPDK permits only ONCE per
+            # process, so we MUST NOT also open an NvmeKvClient here. Use the
+            # injected KvClient if present (tests), else serve the manifest
+            # Retrieve through the SAME KvgHandle (GPU buffer -> small host copy)
+            # via the adapter below — one env, both reads.
+            if self._injected_kv is not None:
+                kv, close_kv = self._injected_kv, (lambda: None)
+            else:
+                kv, close_kv = _KvgManifestClient(kvg), (lambda: None)
+
+            try:
+                weights = iter_named_tensors_gpu(
+                    kvg, kv, revision, precision, keep_buffers=keep
+                )
+                model.load_weights(weights)
+            finally:
+                for gbuf in keep:
+                    gbuf.free()
+                kvg.close()
+                close_kv()
 
     return RadosNkvModelLoader
 

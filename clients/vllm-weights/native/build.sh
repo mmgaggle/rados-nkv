@@ -98,7 +98,7 @@ echo "build.sh: compiling $SHIM_SRC -> $OUT"
 	"$SPDK_ROOT/isa-l/.libs/libisal.a" \
 	"$SPDK_ROOT/isa-l-crypto/.libs/libisal_crypto.a" \
 	-lvfio-user -ljson-c \
-	-pthread -lrt -luuid -lssl -lcrypto -lm -llz4 -lkeyutils -laio \
+	-pthread -lrt -luuid -lssl -lcrypto -lm -llz4 -lfuse3 -lkeyutils -laio \
 	-lrados -lrbd
 
 echo "build.sh: wrote $OUT"

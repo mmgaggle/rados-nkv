@@ -91,36 +91,65 @@ Note: the mem kvdev default `max_value_len` is 1 MiB
 `sc=0x85 SPDK_NVME_SC_INVALID_VALUE_SIZE` (rc=133). Pass `--max-value-len`.
 That is a KV-value-size cap, **not** a DMA/region/GPU limit.
 
-## Rung 2 (wire into the vLLM loader) — design + the one blocker
+## Rung 2 (wire into the vLLM loader) — DONE (device-resident, byte-exact)
 
-The datapath primitive above is the hard part and is done. Rung 2 wraps it:
+The datapath primitive above is the hard part. Rung 2 (bead spdk-p9k.1.1) wraps
+it so the loader emits **device-resident** tensors via the dma-buf Retrieve:
 
-1. **C/HIP transport helper** (extend `kv_host_shim` or add a sibling):
-   `kv_host_shim_dma_alloc_gpu(sh, len) -> {dev_ptr, mmap_iova}` that does the
-   `hipMalloc` + `hsa_amd_portable_export_dmabuf` + `mmap` +
-   `vfio_user_dev_dma_map_unmap` dance and returns both the GPU device pointer
-   and the iova to program; plus a `..._retrieve_gpu(sh, key, dev_buf)` that
-   Retrieves into it. The shim already owns the `vfio_device`, so it can call
-   `vfio_user_dev_dma_map_unmap` directly (it links the static lib).
-2. **Python binding**: expose the device pointer to Python (ctypes over a small
-   `libkv_host_shim_gpu.so`, mirroring `kv_shim/libkv_host_shim.so`).
-3. **Loader emit side** (`vllm_loader.iter_named_tensors`): instead of
-   `torch.frombuffer(bytearray(data))` (a host tensor), Retrieve each tensor's
-   chunks into a registered GPU buffer and wrap the device pointer as a
-   device-resident `torch.Tensor` (`torch.as_tensor`/`from_dlpack` over the HIP
-   pointer), so vLLM's `model.load_weights` performs **no H2D copy**.
+1. **C/HIP transport shim** — `kvg_gpu.hip` → `libkvg_gpu.so` (built by
+   `build_kvg.sh`). Built on the raw vfio-user host client (`nkv_vfu.h`), which
+   exposes the underlying `struct vfio_device *` that
+   `vfio_user_dev_dma_map_unmap` needs. C ABI: `kvg_open(vfu_addr)`,
+   `kvg_buf_alloc(dev, size)` (the `hipMalloc` + `hsa_amd_portable_export_dmabuf`
+   + `mmap` + `vfio_user_dev_dma_map_unmap` dance), `kvg_buf_dptr(buf)` (the GPU
+   device pointer), `kvg_retrieve_gpu(dev, nsid, key, key_len, buf, &got_len)`
+   (Retrieve straight into the GPU region; binary keys, region-bounded SGL).
+   *(The SPDK-NVMe `kv_host_shim` is NOT used for this leg — it hides the
+   `vfio_device` behind the NVMe driver. We use the raw client instead.)*
+2. **Python binding** — `src/rados_nkv_weights/_kvshim_gpu.py` (ctypes over
+   `libkvg_gpu.so`, mirroring `_kvshim.py`): `KvgHandle` + `GpuBuf`, exposing the
+   HIP device pointer (`GpuBuf.dptr`) to Python.
+3. **Loader emit side** — `vllm_loader.iter_named_tensors_gpu` Retrieves each
+   Value directly into a GPU dma-buf region and wraps the device pointer as a
+   device-resident `torch.Tensor` via `__cuda_array_interface__` (uint8 wrap +
+   `.view(dtype)` for bf16/fp8, which CAI's typestr can't name). The unpacked
+   case (one key, offset 0) wraps the whole GPU region with **zero device
+   copies**; the packed/multi-slice case concatenates device byte-slices. The
+   `RadosNkvModelLoader` selects this path when
+   `model_loader_extra_config['rados_nkv_gpu_direct']` is set, so
+   `model.load_weights` does **no implicit H2D copy**.
 
-### BLOCKER for a *complete* Rung-2 e2e on this box: CPU-only torch
+### Acceptance — PROVEN on this box (gfx1151)
 
-The provisioned venv has **`torch 2.11.0+cpu`** (`torch.cuda.is_available()
-== False`, `torch.version.hip == None`; same in the worktree and the primary
-checkout). With CPU-only torch there is no HIP/ROCm tensor backend at all, so a
-*device-resident* `torch.Tensor` — the literal Rung-2 acceptance criterion —
-cannot be constructed regardless of the datapath. The datapath (Rung 1) is
-proven independently of torch via raw HIP kernels.
+`rung2_check.py` publishes a synthetic model into a **live mem-backed nvmf_tgt**
+(no Ceph), reads it back via the CPU loader (host tensors, SPDK-NVMe shim) as the
+reference, then loads it via the GPU-direct path and asserts every tensor is
+**device-resident (`.is_cuda`)** and **byte-exact** vs the reference. Both the
+unpacked direct-wrap path (`pack=False`) and the packed concat path (`pack=True`)
+pass for a bf16/fp16/fp32 mix. The two SPDK host clients each init the SPDK env
+(DPDK: one env per process), so the check runs publish + GPU-load as **separate
+processes**.
 
-To finish Rung 2 e2e, the loader environment needs a **ROCm torch build for
-gfx1151** (e.g. `torch==2.x+rocm6.y`, gfx1151/`HSA_OVERRIDE_GFX_VERSION` as
-needed). Once present, steps 1–3 above are mechanical and validate against the
-CPU reference (`examples/cpu_e2e_vllm.py`, bead spdk-0nt) by greedy-output
-match. Tracked as a follow-up bead.
+```bash
+# bring up the mem nvmf_tgt + KV ns as in the Rung-1 repro above, then:
+bash gpu_direct/build_kvg.sh                 # libkvg_gpu.so
+SPDK_ROOT=<spdk> bash native/build.sh        # libradosnkv_kvshim.so (CPU ref)
+PYTHONPATH=clients/vllm-weights/src \
+  <venv-rocm>/bin/python gpu_direct/rung2_check.py --vfu-addr $RUN/muser/kv
+# => [phase2] PASS: all N tensors device-resident (.is_cuda) AND byte-exact.
+```
+
+The README's earlier blocker (CPU-only torch) is **resolved**: the provisioned
+`.venv-rocm` (bead spdk-32o) ships `torch 2.10.0+rocm7.13` with native gfx1151
+kernels (`torch.cuda.is_available() == True`, `torch.version.hip == 7.13`), so
+device-resident tensors are constructible.
+
+### Best-effort: full `vllm.LLM(...).generate()` — needs vLLM-on-gfx1151
+
+The `.venv-rocm` has torch but **not vLLM** (no gfx1151 build installed), so a
+full `vllm.LLM(load_format="rados-nkv", model_loader_extra_config=
+{"rados_nkv_gpu_direct": 1}).generate()` is deferred. The loader's GPU-direct
+branch is already wired (`RadosNkvModelLoader._load_weights_gpu_direct`), so this
+is a wiring/validation task once vLLM-on-gfx1151 is present — tracked as bead
+**spdk-kuc**. The achievable Rung-2 core (device-resident byte-exact emission) is
+proven directly above without vLLM.
