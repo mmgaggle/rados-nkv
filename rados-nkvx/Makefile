@@ -58,6 +58,14 @@ SERVICE_SRCS := nkvx_service.c nkvx_executor.c nkvx_log_shim.c \
                 $(RADOS_DIR)/kvdev_rados_nkvx_wasm.c $(CONTRACT)
 SERVICE_LIBS := -lrados -lcrypto -ldl -lpthread
 
+# Fast, dependency-free unit tests for the pure ADR-0014 contract helpers
+# (nkvx_oid.h). Deliberately links NOTHING — no Mercury, librados, or wasm — so
+# `make -f Makefile test` runs on any host with a C compiler (CI, a laptop). The
+# end-to-end shell suite (nkvx_*_test.sh, driven by `make run` / the top-level
+# `make check-integration`) covers the I/O-bound paths these helpers feed.
+UNIT_TEST    := nkvx_unit_test
+UNIT_CFLAGS  := -g -O0 -std=gnu11 -Wall -Wextra -Werror
+
 all: $(SERVICE) $(CLIENT)
 
 $(SERVICE): $(SERVICE_SRCS) nkvx_executor.h $(HEADER)
@@ -66,10 +74,17 @@ $(SERVICE): $(SERVICE_SRCS) nkvx_executor.h $(HEADER)
 $(CLIENT): nkvx_exec_client.c $(CONTRACT) $(HEADER)
 	$(CC) $(CFLAGS) -o $@ nkvx_exec_client.c $(CONTRACT) $(LDFLAGS)
 
+$(UNIT_TEST): nkvx_unit_test.c nkvx_oid.h
+	$(CC) $(UNIT_CFLAGS) -o $@ nkvx_unit_test.c
+
+# Build + run the unit tests (the fast, hermetic check).
+test: $(UNIT_TEST)
+	./$(UNIT_TEST)
+
 run: all
 	MERCURY_PREFIX=$(MERCURY_PREFIX) ./nkvx_service_test.sh
 
 clean:
-	rm -f $(SERVICE) $(CLIENT)
+	rm -f $(SERVICE) $(CLIENT) $(UNIT_TEST)
 
-.PHONY: all run clean
+.PHONY: all test run clean

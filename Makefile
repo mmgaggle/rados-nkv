@@ -45,6 +45,40 @@ configure: $(BUILD_DIR)/CMakeCache.txt
 $(FORWARD): | $(BUILD_DIR)/CMakeCache.txt
 	$(CMAKE) --build $(BUILD_DIR) --target $@
 
+# ---- Test aggregation (independent of the CMake superbuild) ----------------
+# `make check` runs the fast, hermetic unit suites — no live nkvx_service, no
+# Mercury/librados, no rig:
+#   - check-c       rados-nkvx pure-C ADR-0014 contract helpers (nkvx_oid.h)
+#   - check-rust    rkv (Rust) `cargo test`
+#   - check-python  vllm-weights (Python) pytest
+# Each is a standalone target so a missing toolchain only blocks that one suite;
+# `check` runs all three and fails if any fails. The I/O-bound end-to-end tests,
+# which need a built executor + Mercury and a running service, are opt-in under
+# `make check-integration`.
+.PHONY: check check-c check-rust check-python check-integration
+
+check: check-c check-rust check-python
+	@echo '=== all unit suites passed ==='
+
+check-c:
+	@echo '=== rados-nkvx C unit tests ==='
+	$(MAKE) -C rados-nkvx test
+
+check-rust:
+	@echo '=== rkv (Rust) unit tests ==='
+	cd clients/rkv && cargo test
+
+check-python:
+	@echo '=== vllm-weights (Python) unit tests ==='
+	cd clients/vllm-weights && python3 -m pytest
+
+# End-to-end / loopback suites. These need the standalone executor built against
+# Mercury (see rados-nkvx/Makefile) and, for the live paths, librados + a running
+# service — so they are NOT part of `make check`.
+check-integration:
+	@echo '=== rados-nkvx end-to-end (Mercury + nkvx_service required) ==='
+	$(MAKE) -C rados-nkvx run
+
 .PHONY: distclean
 distclean:
 	rm -rf $(BUILD_DIR)

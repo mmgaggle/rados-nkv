@@ -24,26 +24,13 @@
 #include "spdk/util.h"		/* spdk_min (declaration-only; safe for this standalone build) */
 #include "kvdev_rados_nkvx_wasm.h"	/* reused wasm runtime + TB4 object cache (C5a.2) */
 
+#include "nkvx_oid.h"		/* nkvx_key_to_oid / nkvx_deliver_len / nkvx_result_too_small
+				 * (pure ADR-0014 contract helpers, unit-tested standalone) */
+
 struct nkvx_executor {
 	rados_t		cluster;
 	rados_ioctx_t	ioctx;
 };
-
-/* Hex-encode a binary key into a NUL-terminated oid (mirrors
- * kvdev_rados_key_to_oid in kvdev_rados.h — the front and executor MUST encode
- * the oid identically, ADR-0014). oid must hold key_len*2 + 1 bytes. */
-static void
-nkvx_key_to_oid(const void *key, uint8_t key_len, char *oid)
-{
-	static const char hex[] = "0123456789abcdef";
-	const uint8_t *k = key;
-
-	for (uint8_t i = 0; i < key_len; i++) {
-		oid[i * 2]     = hex[k[i] >> 4];
-		oid[i * 2 + 1] = hex[k[i] & 0xf];
-	}
-	oid[key_len * 2] = '\0';
-}
 
 int
 nkvx_executor_open(const char *conf, const char *user, const char *pool,
@@ -196,8 +183,8 @@ nkvx_run_builtin(struct nkvx_executor *ex, const char *oid,
 	if (strcmp(module, "inputlen") == 0) {
 		uint64_t len = in->input_len;
 		uint32_t result_len = (uint32_t)sizeof(len);
-		uint32_t deliver = spdk_min(osize, result_len);
-		enum spdk_kvdev_io_status st = (result_len > osize) ?
+		uint32_t deliver = nkvx_deliver_len(result_len, osize);
+		enum spdk_kvdev_io_status st = nkvx_result_too_small(result_len, osize) ?
 			SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL : SPDK_KVDEV_IO_STATUS_SUCCESS;
 
 		return nkvx_result_set(res, st, result_len, &len, deliver);
@@ -205,8 +192,8 @@ nkvx_run_builtin(struct nkvx_executor *ex, const char *oid,
 
 	if (strcmp(module, "inputecho") == 0) {
 		uint32_t result_len = in->input_len;
-		uint32_t deliver = spdk_min(osize, result_len);
-		enum spdk_kvdev_io_status st = (result_len > osize) ?
+		uint32_t deliver = nkvx_deliver_len(result_len, osize);
+		enum spdk_kvdev_io_status st = nkvx_result_too_small(result_len, osize) ?
 			SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL : SPDK_KVDEV_IO_STATUS_SUCCESS;
 		char *buf;
 
@@ -240,8 +227,8 @@ nkvx_run_builtin(struct nkvx_executor *ex, const char *oid,
 	if (strcmp(module, "bytecount") == 0) {
 		uint64_t count = size;	/* object length, LE on this host's wire */
 		uint32_t result_len = (uint32_t)sizeof(count);
-		uint32_t deliver = spdk_min(osize, result_len);
-		enum spdk_kvdev_io_status st = (result_len > osize) ?
+		uint32_t deliver = nkvx_deliver_len(result_len, osize);
+		enum spdk_kvdev_io_status st = nkvx_result_too_small(result_len, osize) ?
 			SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL : SPDK_KVDEV_IO_STATUS_SUCCESS;
 
 		/* 8 B never exceeds NKVX_INLINE_MAX; always inline-deliverable. */
@@ -250,8 +237,10 @@ nkvx_run_builtin(struct nkvx_executor *ex, const char *oid,
 
 	if (strcmp(module, "identity") == 0) {
 		uint32_t result_len = (size > UINT32_MAX) ? UINT32_MAX : (uint32_t)size;
-		uint32_t deliver = spdk_min(osize, result_len);
-		enum spdk_kvdev_io_status st = (size > osize) ?
+		uint32_t deliver = nkvx_deliver_len(result_len, osize);
+		/* True-size check (unclamped): an object larger than UINT32_MAX still
+		 * overflows osize even though result_len saturates. */
+		enum spdk_kvdev_io_status st = nkvx_result_too_small(size, osize) ?
 			SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL : SPDK_KVDEV_IO_STATUS_SUCCESS;
 		char *buf;
 		int n;
