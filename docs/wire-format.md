@@ -69,8 +69,8 @@ length-prefixed payload encoding is RADOS-NKV's choice of that mechanism, and it
 is no less standard-conformant than any other vendor's long-key extension (e.g.
 Samsung's separate host key buffer) — there is simply no standard above 16 bytes
 to conform to. RADOS-NKV unifies on the in-payload form because it reuses the Exec
-decode path and avoids a second DMA for the key (which matters on the kLLM hot
-path, where keys are >16-byte content hashes).
+decode path and avoids a second DMA for the key (which matters on a GPU-initiated
+hot path, where keys are >16-byte content hashes).
 
 ### Length bounds
 
