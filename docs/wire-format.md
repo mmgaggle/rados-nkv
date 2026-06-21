@@ -68,9 +68,12 @@ longer key — it explicitly leaves that to a future "alternative mechanism." Th
 length-prefixed payload encoding is RADOS-NKV's choice of that mechanism, and it
 is no less standard-conformant than any other vendor's long-key extension (e.g.
 Samsung's separate host key buffer) — there is simply no standard above 16 bytes
-to conform to. RADOS-NKV unifies on the in-payload form because it reuses the Exec
-decode path and avoids a second DMA for the key (which matters on a GPU-initiated
-hot path, where keys are >16-byte content hashes).
+to conform to. RADOS-NKV unifies on the in-payload form so a single decode path
+serves both Exec and long base-op keys; where a key does exceed 16 bytes,
+in-payload also avoids the extra key-buffer DMA a separate-pointer scheme would
+add. A cache keyed by a ≤16-byte hash stays inline and needs neither — the
+long-key path is for wider identifiers (see
+[Content-addressed keys and collisions](#content-addressed-keys-and-collisions)).
 
 ### Length bounds
 
@@ -83,6 +86,31 @@ The 255-byte maximum is the **NVMe-KV standard's architectural Key Length limit*
 (the Key Length field is 8 bits wide), not a RADOS-NKV- or Samsung-specific
 number. Any conforming implementation that supports long keys tops out at the same
 value.
+
+### Content-addressed keys and collisions
+
+When the key is a content hash, the key width sets the collision resistance, and a
+collision aliases two distinct values onto one key — a correctness failure, not a
+performance one. The right width depends on the key's role:
+
+- **Routing/index hints can be narrow.** Where a collision only costs a cache or
+  routing miss, 64 bits is enough. llm-d's KV-cache indexer keys blocks with an
+  **FNV-64a (64-bit)** chained hash over `[parent_hash, token_chunk, extra]`
+  (16-token blocks) — it fits the inline slots with room to spare.
+- **An authoritative store wants the wider hash.** When a collision would serve the
+  *wrong* value, the ecosystem uses 256 bits: vLLM's block "engine key" defaults to
+  **SHA-256 (256-bit / 32 bytes)** specifically to address collision risk.
+  RADOS-NKV backing the actual KV blocks plays this store role, so its keys are
+  32-byte content hashes — which is why a GPU-initiated hot path uses the long-key
+  path, not the inline slots.
+
+The birthday math underneath: a 128-bit key collides at ~2^64 entries (a store of
+10^12 distinct entries has collision probability ~10^-15), so 16-byte inline keys
+are themselves collision-safe for a cache. The reason to go to 32 bytes is
+**interop with the 256-bit engine key (e.g. SHA-256), not collision necessity.**
+Identifiers that are intrinsically wider than 16 bytes must use the long-key path
+regardless — e.g. git object IDs (20-byte SHA-1, 32-byte SHA-256), which *are* the
+object's identity and cannot be truncated without breaking addressing-by-OID.
 
 ## Values
 
