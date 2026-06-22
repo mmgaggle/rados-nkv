@@ -37,6 +37,8 @@
 #   CEPH_CONF     ceph.conf path                    (default: /etc/ceph/ceph.conf)
 #   CEPH_KEYRING  keyring path                      (default: <dir of CEPH_CONF>/keyring)
 #   READ_ONLY     0 | 1  (--read-only sets 1)       (default: 0)
+#   REMOTE_EXECUTOR rados-nkvx exec address (two-tier; rados backend only)
+#                                                   (default: empty = single-tier, in-process Exec)
 #   TR_QDEPTH     VFIOUSER queue depth              (default: 1024)
 #   TR_MAXQ       VFIOUSER max qpairs               (default: 16)
 #
@@ -60,6 +62,7 @@ CEPH_USER="${CEPH_USER:-admin}"
 CEPH_CONF="${CEPH_CONF:-/etc/ceph/ceph.conf}"
 CEPH_KEYRING="${CEPH_KEYRING:-}"
 READ_ONLY="${READ_ONLY:-0}"
+REMOTE_EXECUTOR="${REMOTE_EXECUTOR:-}"
 TR_QDEPTH="${TR_QDEPTH:-1024}"
 TR_MAXQ="${TR_MAXQ:-16}"
 
@@ -83,6 +86,7 @@ while [ $# -gt 0 ]; do
 		--user)         CEPH_USER="$2"; shift ;;
 		--conf)         CEPH_CONF="$2"; shift ;;
 		--keyring)      CEPH_KEYRING="$2"; shift ;;
+		--remote-executor) REMOTE_EXECUTOR="$2"; shift ;;
 		-h|--help)      CMD=help ;;
 		*)              die "unknown option: $1 (try 'rados-nkv help')" ;;
 	esac
@@ -107,7 +111,9 @@ preflight() {
 # ---- subcommands ---------------------------------------------------------
 do_up() {
 	preflight
-	echo "rados-nkv up: backend=$BACKEND nqn=$NQN read_only=$READ_ONLY"
+	local tier="single-tier (in-process Exec)"
+	[ "$BACKEND" = rados ] && [ -n "$REMOTE_EXECUTOR" ] && tier="two-tier (executor=$REMOTE_EXECUTOR)"
+	echo "rados-nkv up: backend=$BACKEND nqn=$NQN read_only=$READ_ONLY tier: $tier"
 
 	# 1. VFIOUSER transport (idempotent — tolerated if it already exists)
 	rpc_try nvmf_create_transport -t VFIOUSER -q "$TR_QDEPTH" -m "$TR_MAXQ"
@@ -118,8 +124,9 @@ do_up() {
 		echo "  → kvdev_rados_register_cluster $CLUSTER (user=$CEPH_USER conf=$CEPH_CONF)"
 		rpc_try kvdev_rados_register_cluster "$CLUSTER" \
 			--user "$CEPH_USER" --config-file "$CEPH_CONF" --key-file "$CEPH_KEYRING"
-		echo "  → kvdev_rados_create $KVDEV $CLUSTER $POOL --namespace $CEPH_NS"
-		rpc kvdev_rados_create "$KVDEV" "$CLUSTER" "$POOL" --namespace "$CEPH_NS"
+		local remote=(); [ -n "$REMOTE_EXECUTOR" ] && remote=(--remote-executor "$REMOTE_EXECUTOR")
+		echo "  → kvdev_rados_create $KVDEV $CLUSTER $POOL --namespace $CEPH_NS ${remote[*]}"
+		rpc kvdev_rados_create "$KVDEV" "$CLUSTER" "$POOL" --namespace "$CEPH_NS" "${remote[@]}"
 	else
 		echo "  → kvdev_mem_create $KVDEV"
 		rpc kvdev_mem_create "$KVDEV"

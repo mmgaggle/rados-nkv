@@ -20,3 +20,6 @@
 #CEPH_CONF=/etc/ceph/ceph.conf
 #CEPH_USER=admin
 #READ_ONLY=0
+# Two-tier (rados backend only): rados-nkvx executor self-address over Mercury —
+# the executor's NKVX_LISTEN endpoint. Unset = single-tier (in-process Exec).
+#REMOTE_EXECUTOR=ofi+verbs;ofi_rxm://10.0.0.20:1234
