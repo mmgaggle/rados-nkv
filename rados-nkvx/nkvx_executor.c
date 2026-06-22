@@ -542,17 +542,18 @@ nkvx_executor_run(struct nkvx_executor *ex, const nkvx_exec_in_t *in,
 	nkvx_key_to_oid(in->key, in->key_len, oid);
 
 	/*
-	 * Route exactly as the front did (design §2.2): the built-in route is
-	 * runtime=CLS with module_ns "nkvx" and module_key the built-in name. The
-	 * real-wasm route (runtime=WASM, fetch+verify+run_cached) is Slice C5a.2.
+	 * Route exactly as the front did (design §2.2): both flavors are runtime=NKVX,
+	 * distinguished by module_ns. The BUILT-IN native route is runtime=NKVX with
+	 * module_ns "nkvx" and module_key the built-in name. The cold-fetch WASM route
+	 * (runtime=NKVX, non-"nkvx" module_ns, fetch+verify+run_cached) is Slice C5a.2.
 	 */
-	if (in->runtime == (uint8_t)SPDK_KV_EXEC_RUNTIME_CLS &&
+	if (in->runtime == (uint8_t)SPDK_KV_EXEC_RUNTIME_NKVX &&
 	    in->module_ns != NULL && strcmp(in->module_ns, "nkvx") == 0 &&
 	    in->module_key != NULL) {
 		return nkvx_run_builtin(ex, oid, in, res);
 	}
 
-	if (in->runtime == (uint8_t)SPDK_KV_EXEC_RUNTIME_WASM) {
+	if (in->runtime == (uint8_t)SPDK_KV_EXEC_RUNTIME_NKVX) {
 		return nkvx_run_wasm(ex, oid, in, res);
 	}
 

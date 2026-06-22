@@ -20,7 +20,7 @@
 #   - repeat loop      : 20x the 1 MiB push reusing the same sink buffer, each
 #                        content-hash verified (the PUSH-races-Respond stress)
 #
-# Built-in `identity` (runtime=CLS, module-ns=nkvx) is the large-result vehicle,
+# Built-in `identity` (runtime=NKVX, module-ns=nkvx) is the large-result vehicle,
 # so no wasm/sha256 module gate is involved. Requires Ceph. Env overrides:
 #   CEPH_CONF (default /home/kyle/src/ceph/build/ceph.conf)
 #   RADOS     (default /home/kyle/src/ceph/build/bin/rados)
@@ -98,7 +98,7 @@ run_case() {
 	local desc="$1" key="$2" osize="$3" est="$4" eres="$5" esha="$6"
 	echo "--- $desc ---"
 	"$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-		--runtime 2 --module-ns nkvx --module identity --key "$key" \
+		--runtime 1 --module-ns nkvx --module identity --key "$key" \
 		--osize "$osize" --expect "$est" --expect-result "$eres" --expect-sha256 "$esha" || fail=1
 }
 
@@ -132,7 +132,7 @@ echo "--- 20x 1 MiB PUSH (PUSH-before-respond stress) ---"
 loop_fail=0
 for i in $(seq 1 20); do
 	"$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-		--runtime 2 --module-ns nkvx --module identity --key push1m \
+		--runtime 1 --module-ns nkvx --module identity --key push1m \
 		--osize $((1024*1024)) --expect 0 --expect-result $((1024*1024)) \
 		--expect-sha256 "$SHA_1M" >/dev/null 2>&1 || { loop_fail=1; echo "  iter $i FAILED"; }
 done
@@ -144,7 +144,7 @@ done
 # verifies each iter.
 echo "--- C7.2 handle-cache reuse: 10x 1 MiB PUSH on one front+sink ---"
 "$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-	--runtime 2 --module-ns nkvx --module identity --key push1m \
+	--runtime 1 --module-ns nkvx --module identity --key push1m \
 	--osize $((1024*1024)) --expect 0 --expect-result $((1024*1024)) \
 	--expect-sha256 "$SHA_1M" --iters 10 2>&1 | grep -E "cache (reuse|hits)|FAIL" || fail=1
 

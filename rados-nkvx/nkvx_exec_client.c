@@ -116,7 +116,13 @@ usage(const char *prog)
 		"  --listen     local Mercury init string (default \"na+sm://\"; must match the service transport)\n"
 		"  --target     executor self-address string to forward to\n"
 		"  --addr-file  read the executor address from PATH (published by nkvx_service)\n"
-		"  --expect     expected reply status int (default -7 = NOT_SUPPORTED); exit 1 on mismatch\n",
+		"  --expect     expected reply status int (default -7 = NOT_SUPPORTED); exit 1 on mismatch\n"
+		"  --runtime    exec runtime kind: 1 = NKVX (rados-nkvx executor), 2 = CLS (object-class).\n"
+		"               Under NKVX, --module-ns nkvx selects a BUILT-IN native module;\n"
+		"               any other --module-ns is a cold-fetch wasm module (needs --sha256).\n"
+		"  --module     module key/name (e.g. bytecount, or wasm:<name>)\n"
+		"  --module-ns  module namespace; \"nkvx\" => built-in native, otherwise wasm fetch locator\n"
+		"  --sha256     64 hex chars: bound content hash (required for cold-fetch wasm)\n",
 		prog);
 }
 
@@ -129,7 +135,7 @@ main(int argc, char **argv)
 	int expect = SPDK_KVDEV_IO_STATUS_NOT_SUPPORTED;
 	/* Request fields (defaults preserve the C2 skeleton round-trip). */
 	const char *key = "ping";
-	int runtime = 1;			/* WASM */
+	int runtime = 1;			/* NKVX (built-in native or wasm; module-ns selects) */
 	const char *module_key = "nkvx:bytecount";
 	const char *module_ns = "kvpool";
 	int osize = 4096;
@@ -251,7 +257,8 @@ main(int argc, char **argv)
 	}
 
 	/* A well-formed request; fields are CLI-driven (defaults round-trip the C2
-	 * skeleton, --runtime 2 --module-ns nkvx --module bytecount drives C5a). */
+	 * skeleton, --runtime 1 --module-ns nkvx --module bytecount drives the C5a
+	 * built-in path: runtime=NKVX(1) + module-ns "nkvx" selects a built-in). */
 	nkvx_exec_in_t in;
 	memset(&in, 0, sizeof(in));
 	in.op_id = 0x4242;
