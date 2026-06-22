@@ -21,11 +21,15 @@ ARG WASMTIME_VERSION=36.0.2
 # we do NOT build Ceph). rpm-build + patchelf are for the spec.
 RUN dnf install -y \
         gcc gcc-c++ make cmake git patch xz findutils which \
+        autoconf automake libtool help2man \
         rpm-build patchelf \
-        python3-devel python3-pyelftools \
+        python3-devel python3-pyelftools python3-jinja2 python3-tabulate \
+        uv procps-ng \
         meson ninja-build \
         libaio-devel numactl-devel ncurses-devel openssl-devel \
         libuuid-devel zlib-devel CUnit-devel \
+        json-c-devel libcmocka-devel \
+        fuse3-devel keyutils-libs-devel \
         libfabric-devel boost-devel \
         librados-devel librbd-devel \
         nasm \
@@ -36,7 +40,7 @@ COPY . /src
 
 # wasmtime C-API shared lib (dlopen'd by the Exec path; soname libwasmtime.so).
 # Pinned to the version of the vendored wasmtime.h in the spdk submodule.
-RUN curl -fsSL -o /tmp/wasmtime.tar.xz \
+RUN curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o /tmp/wasmtime.tar.xz \
       "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasmtime-v${WASMTIME_VERSION}-x86_64-linux-c-api.tar.xz" \
     && tar -C /tmp -xf /tmp/wasmtime.tar.xz \
     && install -D -m0755 /tmp/wasmtime-v${WASMTIME_VERSION}-x86_64-linux-c-api/lib/libwasmtime.so \
@@ -44,7 +48,9 @@ RUN curl -fsSL -o /tmp/wasmtime.tar.xz \
     && ldconfig
 
 # Vendor the patched Mercury (vendor-mercury.sh git-applies the dma-buf patch).
-RUN spdk/scripts/vendor-mercury.sh
+# Invoked via bash so the build does not depend on the script's exec bit
+# surviving the build context COPY (it ships 0600 from the spdk submodule).
+RUN bash spdk/scripts/vendor-mercury.sh
 
 # Build SPDK in-place (flags must match `make export-rpms` SPDK_RPM_CONFIGURE).
 RUN cd spdk \
@@ -57,7 +63,14 @@ RUN make -C rados-nkvx -j"$(nproc)" \
         MERCURY_PREFIX=/src/spdk/vendor/mercury-install
 
 # Produce the RPMs: SPDK's own spec (export-rpms) + our rados-nkv spec.
-RUN make export-rpms && make rpm \
+# SPDK's rpm.sh derives its version from `git describe`, which resolves to
+# whatever tag is nearest in the submodule history rather than the real release.
+# Pin it deterministically from the committed version.h via SPDK_VERSION (honored
+# by rpm.sh: version=${SPDK_VERSION:-$(get_version)}).
+RUN SPDK_VERSION="$(awk '$1=="#define" && $2=="SPDK_VERSION_MAJOR"{a=$3} $1=="#define" && $2=="SPDK_VERSION_MINOR"{b=$3} $1=="#define" && $2=="SPDK_VERSION_PATCH"{c=$3} END{print a"."b"."c}' spdk/include/spdk/version.h)" \
+    && echo "Using SPDK_VERSION=$SPDK_VERSION" \
+    && export SPDK_VERSION \
+    && make export-rpms && make rpm \
     && mkdir -p /rpms \
     && cp -v /root/rpmbuild/rpm/x86_64/spdk*.rpm /rpms/ \
     && cp -v /root/rpmbuild/RPMS/x86_64/rados-nkv*.rpm /rpms/

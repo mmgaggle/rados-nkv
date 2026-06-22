@@ -1,0 +1,43 @@
+# Trim the build context for packaging/container/Dockerfile.
+# The image builds only: spdk/, rados-nkvx/, clients/nvme-kv/, scripts/,
+# packaging/, and the top-level license/version files. Everything below is
+# large and unused by the build (weights, VM images, the CMake build tree, git).
+
+.git
+build/
+vm-images/
+
+# clients/: keep only nvme-kv (the kv_shim the RPM spec builds).
+clients/vllm-weights/
+clients/rkv/
+clients/vm/
+clients/nixl/
+clients/rocm-xio/
+
+# Empty submodule placeholders not used by the container build.
+ceph/
+
+# The Dockerfile and build scripts are not consumed inside the image (the RPM
+# spec only reads packaging/rpm/*). Excluding them keeps the `COPY . /src` layer
+# cache stable across Dockerfile edits, so tweaking a late step does not force a
+# full SPDK recompile.
+packaging/container/Dockerfile
+packaging/container/build.sh
+packaging/container/build-clean.sh
+
+# SPDK host-build artifacts must NOT enter the context. The Dockerfile compiles
+# SPDK (and vendors Mercury) from clean sources; shipping the host's build trees
+# breaks the build because cmake/meson caches bake in absolute host paths
+# (/home/kyle/...) and abort when re-run under /src. All of the below are
+# git-ignored generated output in the spdk submodule.
+spdk/build/
+spdk/dpdk/build/
+spdk/dpdk/build-tmp/
+spdk/vendor/
+spdk/mk/config.mk
+spdk/**/*.o
+spdk/**/*.d
+spdk/**/*.a
+spdk/**/*.so
+spdk/**/*.so.*
+spdk/**/.libs/
