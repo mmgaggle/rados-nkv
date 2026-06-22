@@ -367,6 +367,124 @@ nvfu_kv_retrieve(struct nvfu_dev *d, uint32_t nsid, const char *key, void *out,
 }
 
 /*
+ * Slice A1 (docs/wire-format.md "Keys of 17 to 255 bytes — in the payload"):
+ * long-key KV Store. A key longer than the 16-byte inline cap rides
+ * length-prefixed at the HEAD of the DPTR payload, exactly as KV Exec does:
+ *   [u16 key_len][key_len key bytes][value ...]
+ * The inline Key Length (CDW11 bits 7:0) is left 0 to signal the long-key path,
+ * and CDW10 (vsize) carries the VALUE size only (not the key prefix). This works
+ * for any key 1..255 B; callers use it specifically for keys > 16 B.
+ */
+static inline int
+nvfu_kv_store_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t key_len,
+		 const void *value, uint32_t value_len)
+{
+	struct spdk_nvme_cmd cmd;
+	struct spdk_nvme_sgl_descriptor *segs;
+	void *buf;
+	uint64_t iova;
+	uint16_t klp = key_len;
+	uint32_t payload_len = (uint32_t)sizeof(uint16_t) + key_len + value_len;
+	uint32_t bufsz = spdk_max(payload_len, 4096);
+	int status, err = 0;
+
+	memset(&cmd, 0, sizeof(cmd));
+	buf = nvfu_dma_alloc(bufsz, &iova);
+	if (!buf) {
+		return -ENOMEM;
+	}
+	/* Stage [u16 key_len][key][value] at the buffer head. */
+	memcpy(buf, &klp, sizeof(klp));
+	memcpy((char *)buf + sizeof(klp), key, key_len);
+	if (value_len) {
+		memcpy((char *)buf + sizeof(klp) + key_len, value, value_len);
+	}
+	spdk_wmb();
+
+	cmd.opc = SPDK_NVME_OPC_KV_STORE;
+	cmd.nsid = nsid;
+	cmd.cdw11_bits.kv.kl = 0;		/* long-key signal: real length is the u16 prefix */
+	cmd.cdw10_bits.kv.vsize = value_len;	/* VALUE size only (not the key prefix) */
+
+	/* The target gathers payload_len bytes (key prefix + value) on the way in. */
+	segs = nvfu_sgl_set_dptr(&cmd, iova, payload_len, &err);
+	if (err != 0) {
+		spdk_dma_free(buf);
+		return err;
+	}
+	status = nvfu_submit_poll(d, &d->io, &cmd, NULL);
+	if (segs != NULL) {
+		spdk_dma_free(segs);
+	}
+	spdk_dma_free(buf);
+	if (status != 0) {
+		fprintf(stderr, "KV Store (long key) failed: status=0x%x\n", status);
+		return -EIO;
+	}
+	return 0;
+}
+
+/*
+ * Slice A1: long-key KV Retrieve. The DPTR carries [u16 key_len][key] at its
+ * head (host->device) and the value is returned into the same buffer at offset 0
+ * (device->host), overwriting the key prefix; cpl.cdw0 reports the true stored
+ * length. CDW10 (vsize) is the host buffer size for the value. The buffer must be
+ * large enough for both the [u16 key_len][key] request and the returned value.
+ */
+static inline int
+nvfu_kv_retrieve_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t key_len,
+		    void *out, uint32_t out_len, uint32_t *got_len)
+{
+	struct spdk_nvme_cmd cmd;
+	struct spdk_nvme_cpl cpl;
+	struct spdk_nvme_sgl_descriptor *segs;
+	void *buf;
+	uint64_t iova;
+	uint16_t klp = key_len;
+	uint32_t head_len = (uint32_t)sizeof(uint16_t) + key_len;
+	/* The target maps max(head_len, out_len): the key prefix in, the value out. */
+	uint32_t xfer_len = spdk_max(head_len, out_len);
+	uint32_t bufsz = spdk_max(xfer_len, 4096);
+	int status, err = 0;
+
+	memset(&cmd, 0, sizeof(cmd));
+	memset(&cpl, 0, sizeof(cpl));
+	buf = nvfu_dma_alloc(bufsz, &iova);
+	if (!buf) {
+		return -ENOMEM;
+	}
+	/* Stage [u16 key_len][key] at the buffer head (host->device). */
+	memcpy(buf, &klp, sizeof(klp));
+	memcpy((char *)buf + sizeof(klp), key, key_len);
+	spdk_wmb();
+
+	cmd.opc = SPDK_NVME_OPC_KV_RETRIEVE;
+	cmd.nsid = nsid;
+	cmd.cdw11_bits.kv.kl = 0;		/* long-key signal: real length is the u16 prefix */
+	cmd.cdw10_bits.kv.vsize = out_len;	/* host buffer size for the value */
+
+	segs = nvfu_sgl_set_dptr(&cmd, iova, xfer_len, &err);
+	if (err != 0) {
+		spdk_dma_free(buf);
+		return err;
+	}
+	status = nvfu_submit_poll(d, &d->io, &cmd, &cpl);
+	if (segs != NULL) {
+		spdk_dma_free(segs);
+	}
+	if (status != 0) {
+		fprintf(stderr, "KV Retrieve (long key) failed: status=0x%x\n", status);
+		spdk_dma_free(buf);
+		return -EIO;
+	}
+	spdk_rmb();
+	*got_len = spdk_min(cpl.cdw0, out_len);
+	memcpy(out, buf, *got_len);
+	spdk_dma_free(buf);
+	return 0;
+}
+
+/*
  * KV Exec (ADR-0014, opcode 0x83): near-data compute. The op runs an
  * allowlisted module (selected by op_id) against the value stored under `key`,
  * read-only. The request rides the DPTR payload head as [u16 key_len][key]

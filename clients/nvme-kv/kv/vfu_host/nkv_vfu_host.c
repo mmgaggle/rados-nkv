@@ -77,6 +77,43 @@ main(int argc, char **argv)
 		goto out;
 	}
 
+	/*
+	 * Slice A1 (docs/wire-format.md): prove the long-key (17..255 B) in-payload
+	 * path round-trips byte-exact. Store a value under a 255-byte key (the NVMe-KV
+	 * architectural Key Length maximum) carried length-prefixed in the DPTR, then
+	 * retrieve it and compare. The ≤16-byte case above is the inline-path control.
+	 */
+	{
+		uint8_t longkey[255];
+		const char *lvalue = "long-key value carried in-payload, byte-exact round-trip";
+		char lretrieved[256] = {};
+		uint32_t lgot = 0;
+		unsigned i;
+
+		for (i = 0; i < sizeof(longkey); i++) {
+			longkey[i] = (uint8_t)(i + 1);	/* 0x01..0xff, a non-trivial 255-byte key */
+		}
+
+		if (nvfu_kv_store_lk(&d, KV_NSID, (const char *)longkey, sizeof(longkey),
+				     lvalue, (uint32_t)strlen(lvalue)) != 0) {
+			goto out;
+		}
+		printf("KV Store OK (255-byte long key, %zu bytes value)\n", strlen(lvalue));
+
+		if (nvfu_kv_retrieve_lk(&d, KV_NSID, (const char *)longkey, sizeof(longkey),
+					lretrieved, sizeof(lretrieved) - 1, &lgot) != 0) {
+			goto out;
+		}
+		printf("KV Retrieve OK (255-byte long key, %u bytes): '%s'\n", lgot, lretrieved);
+
+		if (lgot != strlen(lvalue) || memcmp(lretrieved, lvalue, lgot) != 0) {
+			fprintf(stderr, "FAIL: long-key value mismatch\n");
+			goto out;
+		}
+		printf("Slice A1 PASS: 255-byte long key Store+Retrieve round-tripped "
+		       "byte-exact via the in-payload [u16 key_len][key] encoding.\n");
+	}
+
 	printf("Milestone 2c PASS: KV Store+Retrieve round-tripped byte-exact "
 	       "through our own vfio-user client -- CPU built the SQE and rang the "
 	       "doorbell, no QEMU, no lib/nvme.\n");
