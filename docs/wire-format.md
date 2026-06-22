@@ -18,11 +18,15 @@ extension, and how keys and namespaces map onto RADOS objects.
 | Retrieve | `0x02` | device → host    | Read the value for a key                  |
 | List     | `0x06` | device → host    | Enumerate keys from a start position       |
 | Delete   | `0x10` | host → device    | Remove a key and its value                |
-| Exist    | `0x14` | —                | Test whether a key is present             |
+| Exist    | `0x14` | host → device\*  | Test whether a key is present             |
 | Exec     | `0x83` | host ↔ device    | Run an allowlisted module against a value |
 
 Store, Retrieve, List, Delete, and Exist are the standard commands. Exec is a
 vendor command (see [Execution](#execution)).
+
+\* Exist transfers no data for an inline key (≤ 16 bytes); a long key (17–255
+bytes) is carried as a small `[u16 key_len][key]` head, host → device (see
+[Keys of 17 to 255 bytes](#keys-of-17-to-255-bytes--in-the-payload)).
 
 ## Keys
 
@@ -147,9 +151,24 @@ backend stores each value as one RADOS object and supports values up to 64 MiB.
 | TTL              | CDW12               | Store                |
 | Data pointer     | PRP1/PRP2 or SGL1   | all transferring data|
 
-List takes the key as a **start position**, where length 0 means "from the
-beginning"; it returns a packed table of `(u16 key_len, key bytes)` entries,
-padded to a 4-byte stride.
+List takes the key as a **start position**; it returns a packed table of
+`(u16 key_len, key bytes)` entries, padded to a 4-byte stride. The start
+position is encoded by length like any other key:
+
+- **Inline Key Length (CDW11 bits 7:0) of 1–16** — an inline start key, in the
+  standard inline slots.
+- **Inline Key Length of 0 with a non-zero `[u16 key_len]` prefix at the head of
+  the DPTR payload** — a long (17–255 byte) in-payload start position, in the
+  same `[u16 key_len][key]` encoding the other long-key ops use (see [Keys of 17
+  to 255 bytes](#keys-of-17-to-255-bytes--in-the-payload)).
+- **Inline Key Length of 0 with a `u16` prefix of 0** (or no key payload) —
+  "from the beginning."
+
+Because List overloads length 0 to mean both "from the beginning" and "decode a
+long start key from the payload head," a host that wants "from the beginning"
+while passing a result buffer **must zero the first 2 bytes** (the `u16 key_len`
+prefix) of that buffer: a non-zero value there is interpreted as a long
+start-key length.
 
 ### Store options (CDW11)
 
