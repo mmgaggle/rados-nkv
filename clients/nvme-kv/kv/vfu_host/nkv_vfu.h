@@ -485,6 +485,75 @@ nvfu_kv_retrieve_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t 
 }
 
 /*
+ * Slice A2 (docs/wire-format.md): long-key KV Delete (0x10) and Exist (0x14).
+ * These carry NO value, but a long key (> 16 B) still does not fit the inline
+ * CDW2/3/14/15 slots, so it rides length-prefixed at the HEAD of the DPTR
+ * payload exactly like Store/Retrieve -- just the [u16 key_len][key] head,
+ * host->device, no value. The inline Key Length (CDW11 bits 7:0) is left 0 to
+ * select the long-key path; CDW10 is 0 (no value transfer).
+ *
+ * Returns the raw NVMe status (sc | sct<<8) from the completion so the caller
+ * can distinguish SUCCESS (0x00) from "key does not exist" (sc 0x87): Exist of
+ * a present key and Delete of a present key complete 0x00; either on an absent
+ * key reports 0x87. Negative returns are transport/setup errors.
+ */
+static inline int
+nvfu_kv_op_lk(struct nvfu_dev *d, uint32_t nsid, uint8_t opc, const char *key,
+	      uint8_t key_len)
+{
+	struct spdk_nvme_cmd cmd;
+	struct spdk_nvme_sgl_descriptor *segs;
+	void *buf;
+	uint64_t iova;
+	uint16_t klp = key_len;
+	uint32_t head_len = (uint32_t)sizeof(uint16_t) + key_len;
+	uint32_t bufsz = spdk_max(head_len, 4096);
+	int status, err = 0;
+
+	memset(&cmd, 0, sizeof(cmd));
+	buf = nvfu_dma_alloc(bufsz, &iova);
+	if (!buf) {
+		return -ENOMEM;
+	}
+	/* Stage [u16 key_len][key] at the buffer head (host->device, no value). */
+	memcpy(buf, &klp, sizeof(klp));
+	memcpy((char *)buf + sizeof(klp), key, key_len);
+	spdk_wmb();
+
+	cmd.opc = opc;
+	cmd.nsid = nsid;
+	cmd.cdw11_bits.kv.kl = 0;		/* long-key signal: real length is the u16 prefix */
+	cmd.cdw10_bits.kv.vsize = 0;		/* no value transfer */
+
+	/* The target gathers head_len bytes (the key prefix) on the way in. */
+	segs = nvfu_sgl_set_dptr(&cmd, iova, head_len, &err);
+	if (err != 0) {
+		spdk_dma_free(buf);
+		return err;
+	}
+	status = nvfu_submit_poll(d, &d->io, &cmd, NULL);
+	if (segs != NULL) {
+		spdk_dma_free(segs);
+	}
+	spdk_dma_free(buf);
+	return status;
+}
+
+/* Slice A2: long-key KV Delete. See nvfu_kv_op_lk for the return convention. */
+static inline int
+nvfu_kv_delete_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t key_len)
+{
+	return nvfu_kv_op_lk(d, nsid, SPDK_NVME_OPC_KV_DELETE, key, key_len);
+}
+
+/* Slice A2: long-key KV Exist. See nvfu_kv_op_lk for the return convention. */
+static inline int
+nvfu_kv_exist_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t key_len)
+{
+	return nvfu_kv_op_lk(d, nsid, SPDK_NVME_OPC_KV_EXIST, key, key_len);
+}
+
+/*
  * KV Exec (ADR-0014, opcode 0x83): near-data compute. The op runs an
  * allowlisted module (selected by op_id) against the value stored under `key`,
  * read-only. The request rides the DPTR payload head as [u16 key_len][key]

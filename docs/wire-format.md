@@ -61,6 +61,12 @@ Retrieve, the data buffer is described as an SGL: the leading segment carries th
 `[u16 key_len][key]` (host → device) and the value is returned into the following
 segment(s) (device → host).
 
+Delete and Exist carry **no value**, but a long key still does not fit the inline
+slots, so they transfer the `[u16 key_len][key]` head alone (host → device) — the
+whole DPTR payload is the key prefix, and the value-size field (CDW10) is 0. A key
+written via the long-key path can therefore be deleted and existence-checked over
+the wire exactly as it was stored.
+
 **Why in-payload.** The NVMe-KV standard carries the key *inline in the command*
 and therefore caps it at 16 bytes: a command with Key Length > 16 is aborted with
 *Invalid Field in Command*. The standard does **not** define how to transport a
