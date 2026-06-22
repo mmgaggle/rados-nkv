@@ -1,12 +1,12 @@
-/*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (C) 2026 IBM Corporation. All rights reserved.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright (C) 2026 IBM Corporation. All rights reserved.
  */
 
 /*
  * Shared raw vfio-user NVMe-KV driver for the Option-A host client
  * (epic spdk-jhk, bead spdk-jhk.3). Used by both:
- *   nkv_vfu_host.c  -- CPU builds the SQE + rings the doorbell  (2c)
- *   nkv_vfu_gpu.hip -- GPU builds the SQE + rings the doorbell  (2d)
+ * nkv_vfu_host.c -- CPU builds the SQE + rings the doorbell (2c)
+ * nkv_vfu_gpu.hip -- GPU builds the SQE + rings the doorbell (2d)
  *
  * The only difference between the two is nvfu_produce(): the producer step that
  * writes the SQE into the SQ ring and rings the SQ doorbell. Each main provides
@@ -367,10 +367,10 @@ nvfu_kv_retrieve(struct nvfu_dev *d, uint32_t nsid, const char *key, void *out,
 }
 
 /*
- * Slice A1 (docs/wire-format.md "Keys of 17 to 255 bytes — in the payload"):
+ * (docs/wire-format.md "Keys of 17 to 255 bytes — in the payload"):
  * long-key KV Store. A key longer than the 16-byte inline cap rides
  * length-prefixed at the HEAD of the DPTR payload, exactly as KV Exec does:
- *   [u16 key_len][key_len key bytes][value ...]
+ * [u16 key_len][key_len key bytes][value ...]
  * The inline Key Length (CDW11 bits 7:0) is left 0 to signal the long-key path,
  * and CDW10 (vsize) carries the VALUE size only (not the key prefix). This works
  * for any key 1..255 B; callers use it specifically for keys > 16 B.
@@ -425,7 +425,7 @@ nvfu_kv_store_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t key
 }
 
 /*
- * Slice A1: long-key KV Retrieve. The DPTR carries [u16 key_len][key] at its
+ * long-key KV Retrieve. The DPTR carries [u16 key_len][key] at its
  * head (host->device) and the value is returned into the same buffer at offset 0
  * (device->host), overwriting the key prefix; cpl.cdw0 reports the true stored
  * length. CDW10 (vsize) is the host buffer size for the value. The buffer must be
@@ -485,7 +485,7 @@ nvfu_kv_retrieve_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t 
 }
 
 /*
- * Slice A2 (docs/wire-format.md): long-key KV Delete (0x10) and Exist (0x14).
+ * (docs/wire-format.md): long-key KV Delete (0x10) and Exist (0x14).
  * These carry NO value, but a long key (> 16 B) still does not fit the inline
  * CDW2/3/14/15 slots, so it rides length-prefixed at the HEAD of the DPTR
  * payload exactly like Store/Retrieve -- just the [u16 key_len][key] head,
@@ -539,14 +539,14 @@ nvfu_kv_op_lk(struct nvfu_dev *d, uint32_t nsid, uint8_t opc, const char *key,
 	return status;
 }
 
-/* Slice A2: long-key KV Delete. See nvfu_kv_op_lk for the return convention. */
+/* long-key KV Delete. See nvfu_kv_op_lk for the return convention. */
 static inline int
 nvfu_kv_delete_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t key_len)
 {
 	return nvfu_kv_op_lk(d, nsid, SPDK_NVME_OPC_KV_DELETE, key, key_len);
 }
 
-/* Slice A2: long-key KV Exist. See nvfu_kv_op_lk for the return convention. */
+/* long-key KV Exist. See nvfu_kv_op_lk for the return convention. */
 static inline int
 nvfu_kv_exist_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t key_len)
 {

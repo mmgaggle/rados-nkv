@@ -1,5 +1,5 @@
-/*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (C) 2026 IBM Corporation. All rights reserved.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright (C) 2026 IBM Corporation. All rights reserved.
  */
 
 /*
@@ -78,7 +78,7 @@ main(int argc, char **argv)
 	}
 
 	/*
-	 * Slice A1 (docs/wire-format.md): prove the long-key (17..255 B) in-payload
+	 * (docs/wire-format.md): prove the long-key (17..255 B) in-payload
 	 * path round-trips byte-exact. Store a value under a 255-byte key (the NVMe-KV
 	 * architectural Key Length maximum) carried length-prefixed in the DPTR, then
 	 * retrieve it and compare. The ≤16-byte case above is the inline-path control.
@@ -110,7 +110,7 @@ main(int argc, char **argv)
 			fprintf(stderr, "FAIL: long-key value mismatch\n");
 			goto out;
 		}
-		printf("Slice A1 PASS: 255-byte long key Store+Retrieve round-tripped "
+		printf("PASS: 255-byte long key Store+Retrieve round-tripped "
 		       "byte-exact via the in-payload [u16 key_len][key] encoding.\n");
 	}
 
