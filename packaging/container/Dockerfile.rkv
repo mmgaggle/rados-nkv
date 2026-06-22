@@ -97,6 +97,10 @@ COPY --from=rkv-builder /src/clients/rkv/target/release/rkv /usr/bin/rkv
 COPY --from=rkv-builder /src/spdk/build/libvfio-user/usr/local/lib/. /usr/local/lib/
 RUN ldconfig
 
+# Pin HOME so the entrypoint AND `podman exec`'d rkv calls resolve the same
+# ~/.rados-nkv.conf and persistent-session daemon socket ($HOME/.rados-nkv.sock).
+ENV HOME=/root
+
 # Entrypoint launcher.
 COPY packaging/container/rkv-entrypoint.sh /usr/libexec/rados-nkv/rkv-entrypoint
 RUN chmod 0755 /usr/libexec/rados-nkv/rkv-entrypoint
