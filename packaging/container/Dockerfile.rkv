@@ -1,0 +1,112 @@
+# rados-nkv-client — the `rkv` Rust NVMe-KV CLI as a SEPARATE image.
+#
+# Why separate: rkv pulls in the Rust toolchain (and, with WITH_GPU, ROCm/HIP).
+# Keeping it out of the lean nkv/nkvx datapath image (packaging/container/
+# Dockerfile) avoids bloating that image. This Dockerfile REUSES the already-
+# built SPDK from the builder image — it does NOT recompile SPDK.
+#
+# The builder (localhost/rados-nkv-builder:devel_v0.1.0, produced by
+# build-clean.sh) carries the full repo at /src with SPDK prebuilt at
+# /src/spdk/build (libs, dpdk/build/lib, isa-l/.libs, libvfio-user) and
+# clients/nvme-kv present — but NOT clients/rkv (it is .dockerignore'd from the
+# base build). build-client.sh stages a context that supplies clients/rkv, which
+# we COPY into the builder tree here.
+#
+#   podman build -f packaging/container/Dockerfile.rkv \
+#     -t quay.io/mmgaggle/rados-nkv-client:devel_v0.1.0 <staged-context>
+
+ARG BUILDER=localhost/rados-nkv-builder:devel_v0.1.0
+ARG FEDORA_VERSION=44
+ARG WITH_GPU=0
+
+# ---------------------------------------------------------------------------
+FROM ${BUILDER} AS rkv-builder
+ARG WITH_GPU
+
+# CPU build needs the Rust toolchain plus the link-time devel packages whose
+# .so symlinks the base builder image does NOT carry: rdma-core-devel
+# (libibverbs.so/librdmacm.so) and lz4-devel (liblz4.so). build.rs links the SPDK
+# datapath with -libverbs -lrdmacm -llz4; without the devel symlinks ld fails
+# with "cannot find -libverbs". (numactl/json-c/uuid/openssl/fuse3/keyutils
+# devel symlinks are already present from the SPDK build.)
+RUN dnf install -y cargo rust rdma-core-devel lz4-devel && dnf clean all
+
+# WITH_GPU=1 additionally links HIP in-process via the `gpu-native` feature,
+# which needs hipcc + libamdhip64 at build time. The base builder has NO ROCm,
+# so this path is provided for completeness; it requires a BUILDER image that
+# carries ROCm (or extend it here). hipcc lands at /usr/bin/hipcc on Fedora's
+# rocm packages; NKVX_HIPCC lets build.rs find it if it is elsewhere.
+RUN if [ "${WITH_GPU}" = "1" ]; then \
+        dnf install -y hipcc rocm-hip-devel rocm-runtime || \
+        dnf install -y rocm-hip rocm-runtime hipcc || \
+        (echo "ERROR: WITH_GPU=1 but ROCm/hipcc packages unavailable in this builder." >&2; exit 1); \
+        dnf clean all; \
+    fi
+
+# Bring in clients/rkv (absent from the builder image's /src).
+COPY clients/rkv /src/clients/rkv
+WORKDIR /src/clients/rkv
+
+# build.rs locates the prebuilt SPDK via NKVX_SPDK_BUILD; root = its parent.
+ENV NKVX_SPDK_BUILD=/src/spdk/build
+
+# Build the binary. CPU is the default (ROCm-free); WITH_GPU=1 adds gpu-native.
+RUN if [ "${WITH_GPU}" = "1" ]; then \
+        export NKVX_HIPCC="${NKVX_HIPCC:-$(command -v hipcc || echo /usr/bin/hipcc)}"; \
+        cargo build --release --features gpu-native; \
+    else \
+        cargo build --release; \
+    fi \
+    && test -x /src/clients/rkv/target/release/rkv
+
+# ---------------------------------------------------------------------------
+FROM fedora:${FEDORA_VERSION} AS runtime
+LABEL org.opencontainers.image.title="rados-nkv-client" \
+      org.opencontainers.image.description="rkv — ergonomic Rust CLI for the NVMe-KV (rados-nkvx) datapath over vfio-user" \
+      org.opencontainers.image.source="https://github.com/mmgaggle/rados-nkv"
+
+# Runtime shared-lib deps the rkv binary links dynamically (verified via `ldd`
+# below). SPDK/isa-l/libvfio-user are statically linked, so only the distro
+# shared libs below are needed: numactl-libs (libnuma.so.1), libibverbs
+# (libibverbs.so.1) + librdmacm (librdmacm.so.1) — these are SEPARATE packages,
+# the rdma-core metapackage does NOT pull them in on Fedora 44 — json-c
+# (libjson-c.so.5), libuuid (libuuid.so.1), openssl-libs (libssl/libcrypto.so.3),
+# lz4-libs (liblz4.so.1), fuse3-libs (libfuse3.so.4), keyutils-libs
+# (libkeyutils.so.1). libz comes via openssl/transitive deps; libgcc/glibc are in
+# the base image.
+RUN dnf install -y \
+        numactl-libs \
+        libibverbs \
+        librdmacm \
+        json-c \
+        libuuid \
+        openssl-libs \
+        lz4-libs \
+        fuse3-libs \
+        keyutils-libs \
+    && dnf clean all
+
+# The rkv binary.
+COPY --from=rkv-builder /src/clients/rkv/target/release/rkv /usr/bin/rkv
+
+# libvfio-user: the builder ships it as a STATIC archive (libvfio-user.a) only,
+# so build.rs links it statically and the binary has NO dynamic -lvfio-user dep.
+# Should a future builder produce a shared libvfio-user.so, copy it so the
+# dynamic link resolves. The trailing path keeps the COPY a no-op-safe when only
+# the .a exists (the .a is harmless in /usr/local/lib). ldconfig either way.
+COPY --from=rkv-builder /src/spdk/build/libvfio-user/usr/local/lib/. /usr/local/lib/
+RUN ldconfig
+
+# Entrypoint launcher.
+COPY packaging/container/rkv-entrypoint.sh /usr/libexec/rados-nkv/rkv-entrypoint
+RUN chmod 0755 /usr/libexec/rados-nkv/rkv-entrypoint
+
+# Verify the dynamic link is fully satisfied — fail the build on any "not found".
+RUN ldd /usr/bin/rkv \
+    && if ldd /usr/bin/rkv | grep -q "not found"; then \
+        echo "ERROR: rkv has unresolved shared libraries:" >&2; \
+        ldd /usr/bin/rkv | grep "not found" >&2; \
+        exit 1; \
+    fi
+
+ENTRYPOINT ["/usr/libexec/rados-nkv/rkv-entrypoint"]
