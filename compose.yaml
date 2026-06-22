@@ -1,0 +1,99 @@
+# rados-nkv — podman compose for the datapath (nkv/nkvx) + the rkv client.
+#
+# Single-tier, self-contained (default; mem backend, no Ceph):
+#   sudo podman-compose up -d
+#   sudo podman-compose exec rkv rkv store kv/hello      # value from stdin
+#   sudo podman-compose exec rkv rkv get   kv/hello
+#   sudo podman-compose down
+#
+# Two-tier (nkv front + nkvx executor; REAL Exec needs a Ceph cluster):
+#   - set NKV_BACKEND=rados and REMOTE_EXECUTOR=ofi+tcp://127.0.0.1:1234
+#   - uncomment the /etc/ceph mounts on `nkv` and `nkvx`
+#   - sudo podman-compose --profile two-tier up -d
+#
+# Notes:
+#   * vfio-user is host-local: the services share the `muser` volume and the host
+#     network. The rkv client attaches to the front's `cntrl` socket there.
+#   * Run rootful (`sudo podman-compose`): SPDK needs hugepages + memlock and the
+#     vfio-user privileges. The `ofi+verbs` (RDMA) inter-tier transport REQUIRES
+#     rootful (rootless caps memlock); `ofi+tcp` (the default here) and the mem
+#     backend are the rootless-friendlier paths. For verbs, also add
+#     `--device /dev/infiniband` to nkv + nkvx and bind NKVX_LISTEN to the RoCE IP.
+#   * The rkv container idles so you can run a SERIES of commands via
+#     `podman-compose exec rkv rkv …`. Set RKV_DAEMON=1 to start the warm
+#     persistent session (one vfio-user attach) once the front is up.
+
+name: rados-nkv
+
+services:
+  # ---- Front / target: NVMe-KV over vfio-user ----
+  nkv:
+    image: quay.io/mmgaggle/rados-nkv:devel
+    network_mode: host
+    privileged: true
+    security_opt:
+      - label=disable
+    ulimits:
+      memlock: -1
+    volumes:
+      - muser:/var/run/muser
+      - /dev/hugepages:/dev/hugepages
+      # two-tier (rados backend) — mount your Ceph config + keyring:
+      # - /etc/ceph:/etc/ceph:ro,z
+    environment:
+      NKV_ROLE: nkv
+      BACKEND: ${NKV_BACKEND:-mem}
+      POOL: ${POOL:-kvpool}
+      CEPH_NS: ${CEPH_NS:-kvns}
+      CEPH_CONF: /etc/ceph/ceph.conf
+      CEPH_USER: ${CEPH_USER:-admin}
+      # empty => single-tier (in-process Exec); set for two-tier:
+      REMOTE_EXECUTOR: ${REMOTE_EXECUTOR:-}
+      # mem dev default avoids hugepages; for rados use e.g. "-m 0x1 -s 4096":
+      NVMF_TGT_ARGS: ${NVMF_TGT_ARGS:---no-huge -s 1024}
+
+  # ---- Executor (two-tier only): Mercury Exec target, co-located with OSDs ----
+  nkvx:
+    image: quay.io/mmgaggle/rados-nkv:devel
+    profiles: [two-tier]
+    network_mode: host
+    security_opt:
+      - label=disable
+    ulimits:
+      memlock: -1
+    volumes:
+      - nkvx-run:/var/run/rados-nkvx
+      # - /etc/ceph:/etc/ceph:ro,z
+      # verbs: - /dev/infiniband:/dev/infiniband  (or use `devices:`)
+    environment:
+      NKV_ROLE: nkvx
+      NKVX_LISTEN: ${NKVX_LISTEN:-ofi+tcp://127.0.0.1:1234}
+      NKVX_ADDR_FILE: /var/run/rados-nkvx/addr
+      NKVX_RADOS_POOL: ${POOL:-kvpool}
+      NKVX_RADOS_NAMESPACE: ${CEPH_NS:-kvns}
+      NKVX_RADOS_CONF: /etc/ceph/ceph.conf
+      NKVX_RADOS_USER: ${CEPH_USER:-admin}
+
+  # ---- rkv client: idles so you can exec a series of commands into it ----
+  rkv:
+    image: quay.io/mmgaggle/rados-nkv-client:devel
+    network_mode: host
+    privileged: true
+    security_opt:
+      - label=disable
+    ulimits:
+      memlock: -1
+    depends_on:
+      - nkv
+    volumes:
+      - muser:/var/run/muser
+      - /dev/hugepages:/dev/hugepages
+      - ./packaging/container/rados-nkv.conf:/root/.rados-nkv.conf:ro,z
+    environment:
+      # 1 => start the warm persistent-session daemon at container start (the
+      # front must be up). 0 => plain idle; each exec'd `rkv` is one-shot.
+      RKV_DAEMON: ${RKV_DAEMON:-0}
+
+volumes:
+  muser:
+  nkvx-run:
