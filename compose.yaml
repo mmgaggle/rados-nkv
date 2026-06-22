@@ -38,14 +38,17 @@ services:
     volumes:
       - muser:/var/run/muser
       - /dev/hugepages:/dev/hugepages
-      # two-tier (rados backend) — mount your Ceph config + keyring:
-      # - /etc/ceph:/etc/ceph:ro,z
+      # Ceph config for the rados backend / two-tier, mounted at the SAME path so a
+      # dev (vstart) ceph.conf's internal references resolve. Unused by the mem
+      # backend; podman creates the source dir if it doesn't exist. Override with
+      # CEPH_DIR=/path/to/ceph (e.g. a vstart build dir) for two-tier.
+      - ${CEPH_DIR:-/etc/ceph}:${CEPH_DIR:-/etc/ceph}:ro
     environment:
       NKV_ROLE: nkv
       BACKEND: ${NKV_BACKEND:-mem}
       POOL: ${POOL:-kvpool}
       CEPH_NS: ${CEPH_NS:-kvns}
-      CEPH_CONF: /etc/ceph/ceph.conf
+      CEPH_CONF: ${CEPH_DIR:-/etc/ceph}/ceph.conf
       CEPH_USER: ${CEPH_USER:-admin}
       # empty => single-tier (in-process Exec); set for two-tier:
       REMOTE_EXECUTOR: ${REMOTE_EXECUTOR:-}
@@ -63,15 +66,15 @@ services:
       memlock: -1
     volumes:
       - nkvx-run:/var/run/rados-nkvx
-      # - /etc/ceph:/etc/ceph:ro,z
-      # verbs: - /dev/infiniband:/dev/infiniband  (or use `devices:`)
+      - ${CEPH_DIR:-/etc/ceph}:${CEPH_DIR:-/etc/ceph}:ro
+      # verbs: also pass the RDMA device — devices: ["/dev/infiniband"]
     environment:
       NKV_ROLE: nkvx
       NKVX_LISTEN: ${NKVX_LISTEN:-ofi+tcp://127.0.0.1:1234}
       NKVX_ADDR_FILE: /var/run/rados-nkvx/addr
       NKVX_RADOS_POOL: ${POOL:-kvpool}
       NKVX_RADOS_NAMESPACE: ${CEPH_NS:-kvns}
-      NKVX_RADOS_CONF: /etc/ceph/ceph.conf
+      NKVX_RADOS_CONF: ${CEPH_DIR:-/etc/ceph}/ceph.conf
       NKVX_RADOS_USER: ${CEPH_USER:-admin}
 
   # ---- rkv client: idles so you can exec a series of commands into it ----

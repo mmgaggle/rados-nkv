@@ -66,7 +66,40 @@ The full list is in `packaging/rpm/rados-nkv{,x}.sysconfig` and `scripts/rados-n
 > **`ofi+verbs` (RDMA) flow requires rootful podman** — see
 > [Host devices, hugepages, and the RDMA NIC](#host-devices-hugepages-and-the-rdma-nic).
 
-### Target with the in-memory backend (no Ceph)
+### Quick start (podman compose)
+
+[`compose.yaml`](compose.yaml) wires the stack on one host. Run rootful — SPDK
+needs hugepages + vfio-user privileges:
+
+```bash
+# single-tier, self-contained: nkv (mem backend) + the rkv client
+sudo podman-compose up -d
+sudo podman-compose exec rkv rkv store kv/hello   # value from stdin
+sudo podman-compose exec rkv rkv get   kv/hello
+sudo podman-compose down
+
+# two-tier on one host: front + nkvx executor over ofi+tcp, against a Ceph
+# cluster (e.g. a vstart build dir via CEPH_DIR)
+sudo CEPH_DIR=/path/to/ceph NKV_BACKEND=rados \
+     REMOTE_EXECUTOR=ofi+tcp://127.0.0.1:1234 NKVX_LISTEN=ofi+tcp://127.0.0.1:1234 \
+     podman-compose --profile two-tier up -d
+```
+
+The `rkv` service idles, so you run a series of commands via
+`podman-compose exec rkv rkv …` (set `RKV_DAEMON=1` for a warm session that
+amortizes the vfio-user attach). For the `ofi+verbs` (RDMA) inter-tier transport,
+run rootful and add the RDMA device + memlock flags (see
+[Host devices…](#host-devices-hugepages-and-the-rdma-nic)).
+
+> **Gotcha:** podman-compose reuses existing containers across `up`, so a newly
+> pulled/built image is *not* picked up by `down`/`up` alone — `podman rm -f` the
+> services (or `podman-compose down` then remove them) to force a recreate.
+
+Compose is single-host. For a **cross-host** two-tier split (front on the GPU
+host, executor on a separate OSD host) use the per-container commands below — the
+same env-knob contract, just on two machines.
+
+### Target with the in-memory backend (no Ceph) — without compose
 
 A dev loop with no cluster — the `kvdev_mem` backend keeps values in the target's
 RAM:
@@ -103,12 +136,13 @@ podman run --rm --name nkv --privileged \
   quay.io/mmgaggle/rados-nkv:devel
 ```
 
-### Two-tier (front + remote executor)
+### Two-tier (front + remote executor) — cross-host
 
 Split the tenant edge from the computation: a front local to the GPU/client and a
 `rados-nkvx` executor co-located with the OSDs, linked by an RPC over Mercury
 (RDMA in production; `ofi+tcp` / `na+sm` for bring-up). See
-[`docs/two-tier.md`](docs/two-tier.md) for the topology and transport rules.
+[`docs/two-tier.md`](docs/two-tier.md) for the topology and transport rules. (For
+a single-host two-tier demo, use the compose `two-tier` profile above instead.)
 
 > **The `ofi+verbs` (RDMA) path needs rootful podman.** Rootless podman caps
 > memlock at the user's hard limit (commonly 8 MB), too small for RDMA memory
