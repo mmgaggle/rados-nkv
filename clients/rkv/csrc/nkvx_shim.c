@@ -239,8 +239,12 @@ nkvx_exec(nkvx_session *s, uint32_t nsid, const char *key, uint32_t op_id,
 	cmd.opc = SPDK_NVME_OPC_KV_EXEC;
 	cmd.nsid = nsid;
 	cmd.cdw10_bits.kv.vsize = payload_len;		/* request payload length */
-	cmd.cdw12_bits.kv_exec.osize = out_len;		/* output buffer size */
-	cmd.cdw13_bits.kv_exec.op_id = op_id;
+	/* KV Exec osize/op_id were named bitfields (full-width :32) in the old SPDK
+	 * fork; the out-of-tree base SPDK (Gerrit 28298) has no kv_exec cdw members,
+	 * so write the raw CDW words — byte-identical wire output. (See the same fix
+	 * in clients/nvme-kv/kv/vfu_host/nkv_vfu.h.) */
+	cmd.cdw12 = out_len;		/* KV Exec output buffer size (vendor ext) */
+	cmd.cdw13 = op_id;		/* KV Exec op_id (vendor ext) */
 
 	segs = nvfu_sgl_set_dptr(&cmd, iova, xfer_len, &err);
 	if (err != 0) {

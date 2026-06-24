@@ -21,14 +21,17 @@ log() { echo "rados-nkv[$NKV_ROLE]: $*" >&2; }
 # one-shot `rados-nkv up` RPC config once its socket is listening.
 # ---------------------------------------------------------------------------
 start_nkv() {
-	local nvmf_tgt="${NVMF_TGT:-/usr/local/bin/nvmf_tgt}"
+	# OUT-OF-TREE (Slice I): the front is the custom `nkv_tgt` app that loads the
+	# bdev_kvrados forwarder module, NOT stock nvmf_tgt. NVMF_TGT defaults to it
+	# (the image sets ENV NVMF_TGT=/usr/local/bin/nkv_tgt).
+	local nvmf_tgt="${NVMF_TGT:-/usr/local/bin/nkv_tgt}"
 	local rpc_sock="${RPC_SOCK:-/var/run/spdk.sock}"
-	# The installed rados-nkv script finds rpc.py under $SPDK_ROOT/scripts;
-	# spdk-scripts ships it at /usr/libexec/spdk/scripts/rpc.py.
+	# rados-nkv finds rpc.py + the spdk python pkg under $SPDK_ROOT (the prebuilt
+	# base SPDK tree the image ships; ENV SPDK_ROOT points at it).
 	export SPDK_ROOT="${SPDK_ROOT:-/usr/libexec/spdk}"
 	export RPC_SOCK="$rpc_sock"
 
-	[ -x "$nvmf_tgt" ] || { log "nvmf_tgt not found at $nvmf_tgt (install spdk)"; exit 127; }
+	[ -x "$nvmf_tgt" ] || { log "nkv_tgt not found at $nvmf_tgt (install rados-nkv)"; exit 127; }
 	rm -f "$rpc_sock"
 
 	# NVMF_TGT_ARGS is an intentional word-split ops knob (e.g. "-m 0x1 -s 4096",
@@ -63,6 +66,15 @@ start_nkvx() {
 	[ -n "${NKVX_RADOS_NAMESPACE:-}" ]&& args+=( --rados-namespace "$NKVX_RADOS_NAMESPACE" )
 	[ -n "${NKVX_RADOS_CONF:-}" ]     && args+=( --rados-conf      "$NKVX_RADOS_CONF" )
 	[ -n "${NKVX_RADOS_USER:-}" ]     && args+=( --rados-user      "$NKVX_RADOS_USER" )
+	# Self-contained, no-Ceph dev path: NKVX_MEM_OBJECT (space-separated KEY=VALUE
+	# seeds) puts the executor in its writable in-memory backend — STORE/RETRIEVE/
+	# DELETE/EXIST/LIST all operate on the in-mem map. Mutually exclusive with the
+	# --rados-* args above (the service rejects both). At least one seed is needed
+	# to flip the mem switch; keys you actually STORE need not be pre-seeded.
+	if [ -n "${NKVX_MEM_OBJECT:-}" ]; then
+		local obj
+		for obj in ${NKVX_MEM_OBJECT}; do args+=( --mem-object "$obj" ); done
+	fi
 	log "exec nkvx_service ${args[*]}"
 	exec nkvx_service "${args[@]}"
 }

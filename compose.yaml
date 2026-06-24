@@ -1,64 +1,59 @@
-# rados-nkv — podman compose for the datapath (nkv/nkvx) + the rkv client.
+# rados-nkv — podman compose for the OUT-OF-TREE datapath (Slice I).
 #
-# Single-tier, self-contained (default; mem backend, no Ceph):
+# Topology change vs the old in-tree layout: bdev_kvrados is now a pure FORWARDER
+# (the in-tree kvdev_mem/kvdev_rados backends are GONE), so the front (nkv) ALWAYS
+# forwards KV verbs over Mercury to a rados-nkvx executor (nkvx). The executor is
+# therefore a CORE service here, not a two-tier-only add-on.
+#
+# Self-contained, no Ceph (default; executor runs its writable in-memory backend):
 #   sudo podman-compose up -d
 #   sudo podman-compose exec rkv rkv store kv/hello      # value from stdin
 #   sudo podman-compose exec rkv rkv get   kv/hello
 #   sudo podman-compose down
 #
-# Two-tier (nkv front + nkvx executor; REAL Exec needs a Ceph cluster):
-#   - set NKV_BACKEND=rados and REMOTE_EXECUTOR=ofi+tcp://127.0.0.1:1234
-#   - uncomment the /etc/ceph mounts on `nkv` and `nkvx`
-#   - sudo podman-compose --profile two-tier up -d
+# Real Ceph (executor cold-fills + persists to a RADOS pool):
+#   - set NKVX_BACKEND=rados, point CEPH_DIR at a ceph.conf+keyring dir, set POOL
+#   - sudo podman-compose --profile rados up -d         (uses the `nkvx-rados` executor)
 #
 # Notes:
 #   * vfio-user is host-local: the services share the `muser` volume and the host
 #     network. The rkv client attaches to the front's `cntrl` socket there.
+#   * The front reaches the executor over Mercury at REMOTE_EXECUTOR
+#     (ofi+tcp://127.0.0.1:1234 by default — deterministic, so the front uses it
+#     verbatim; both services run on the host network). For RDMA use
+#     ofi+verbs://… , run rootful, and add --device /dev/infiniband to both.
 #   * Run rootful (`sudo podman-compose`): SPDK needs hugepages + memlock and the
-#     vfio-user privileges. The `ofi+verbs` (RDMA) inter-tier transport REQUIRES
-#     rootful (rootless caps memlock); `ofi+tcp` (the default here) and the mem
-#     backend are the rootless-friendlier paths. For verbs, also add
-#     `--device /dev/infiniband` to nkv + nkvx and bind NKVX_LISTEN to the RoCE IP.
+#     vfio-user privileges.
 #   * The rkv container idles so you can run a SERIES of commands via
-#     `podman-compose exec rkv rkv …`. Set RKV_DAEMON=1 to start the warm
-#     persistent session (one vfio-user attach) once the front is up.
+#     `podman-compose exec rkv rkv …`.
 
 name: rados-nkv
 
+x-executor-listen: &executor_listen ${NKVX_LISTEN:-ofi+tcp://127.0.0.1:1234}
+
 services:
-  # ---- Front / target: NVMe-KV over vfio-user ----
-  nkv:
+  # ---- Executor: rados-nkvx Mercury Exec target. The forwarder ALWAYS needs it.
+  #      Default flavor: writable in-memory backend (no Ceph). ------------------
+  nkvx:
     image: quay.io/mmgaggle/rados-nkv:devel
     network_mode: host
-    privileged: true
     security_opt:
       - label=disable
     ulimits:
       memlock: -1
     volumes:
-      - muser:/var/run/muser
-      - /dev/hugepages:/dev/hugepages
-      # Ceph config for the rados backend / two-tier, mounted at the SAME path so a
-      # dev (vstart) ceph.conf's internal references resolve. Unused by the mem
-      # backend; podman creates the source dir if it doesn't exist. Override with
-      # CEPH_DIR=/path/to/ceph (e.g. a vstart build dir) for two-tier.
-      - ${CEPH_DIR:-/etc/ceph}:${CEPH_DIR:-/etc/ceph}:ro
+      - nkvx-run:/var/run/rados-nkvx
     environment:
-      NKV_ROLE: nkv
-      BACKEND: ${NKV_BACKEND:-mem}
-      POOL: ${POOL:-kvpool}
-      CEPH_NS: ${CEPH_NS:-kvns}
-      CEPH_CONF: ${CEPH_DIR:-/etc/ceph}/ceph.conf
-      CEPH_USER: ${CEPH_USER:-admin}
-      # empty => single-tier (in-process Exec); set for two-tier:
-      REMOTE_EXECUTOR: ${REMOTE_EXECUTOR:-}
-      # mem dev default avoids hugepages; for rados use e.g. "-m 0x1 -s 4096":
-      NVMF_TGT_ARGS: ${NVMF_TGT_ARGS:---no-huge -s 1024}
+      NKV_ROLE: nkvx
+      NKVX_LISTEN: *executor_listen
+      NKVX_ADDR_FILE: /var/run/rados-nkvx/addr
+      # Writable in-memory backend (one seed flips the switch; not a real key).
+      NKVX_MEM_OBJECT: ${NKVX_MEM_OBJECT:-__seed__=x}
 
-  # ---- Executor (two-tier only): Mercury Exec target, co-located with OSDs ----
-  nkvx:
+  # ---- Executor (Ceph flavor): same image, RADOS backend instead of mem. ------
+  nkvx-rados:
     image: quay.io/mmgaggle/rados-nkv:devel
-    profiles: [two-tier]
+    profiles: [rados]
     network_mode: host
     security_opt:
       - label=disable
@@ -67,17 +62,46 @@ services:
     volumes:
       - nkvx-run:/var/run/rados-nkvx
       - ${CEPH_DIR:-/etc/ceph}:${CEPH_DIR:-/etc/ceph}:ro
-      # verbs: also pass the RDMA device — devices: ["/dev/infiniband"]
     environment:
       NKV_ROLE: nkvx
-      NKVX_LISTEN: ${NKVX_LISTEN:-ofi+tcp://127.0.0.1:1234}
+      NKVX_LISTEN: *executor_listen
       NKVX_ADDR_FILE: /var/run/rados-nkvx/addr
       NKVX_RADOS_POOL: ${POOL:-kvpool}
       NKVX_RADOS_NAMESPACE: ${CEPH_NS:-kvns}
       NKVX_RADOS_CONF: ${CEPH_DIR:-/etc/ceph}/ceph.conf
       NKVX_RADOS_USER: ${CEPH_USER:-admin}
 
-  # ---- rkv client: idles so you can exec a series of commands into it ----
+  # ---- Front / target: NVMe-KV over vfio-user, forwards to the executor. ------
+  nkv:
+    image: quay.io/mmgaggle/rados-nkv:devel
+    network_mode: host
+    privileged: true
+    security_opt:
+      - label=disable
+    ulimits:
+      memlock: -1
+    depends_on:
+      - nkvx
+    volumes:
+      - muser:/var/run/muser
+      - nkvx-run:/var/run/rados-nkvx:ro
+      - /dev/hugepages:/dev/hugepages
+      # Ceph config (rados flavor only); unused by the mem default.
+      - ${CEPH_DIR:-/etc/ceph}:${CEPH_DIR:-/etc/ceph}:ro
+    environment:
+      NKV_ROLE: nkv
+      BACKEND: ${NKV_BACKEND:-mem}
+      POOL: ${POOL:-kvpool}
+      CEPH_NS: ${CEPH_NS:-kvns}
+      # The forwarder reaches the executor here. ofi+tcp is deterministic, so the
+      # front uses REMOTE_EXECUTOR verbatim; for na+sm set EXECUTOR_ADDR_FILE to
+      # the shared addr-file instead (mounted read-only above).
+      REMOTE_EXECUTOR: ${REMOTE_EXECUTOR:-ofi+tcp://127.0.0.1:1234}
+      EXECUTOR_ADDR_FILE: ${EXECUTOR_ADDR_FILE:-/var/run/rados-nkvx/addr}
+      # mem dev default avoids hugepages; for a hugepage run drop --no-huge.
+      NVMF_TGT_ARGS: ${NVMF_TGT_ARGS:---no-huge -s 1024 -m 0x2}
+
+  # ---- rkv client: idles so you can exec a series of commands into it ---------
   rkv:
     image: quay.io/mmgaggle/rados-nkv-client:devel
     network_mode: host
