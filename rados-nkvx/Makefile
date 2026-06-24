@@ -69,6 +69,20 @@ MERCURY_LIBS    := $(shell PKG_CONFIG_PATH=$(MERCURY_PREFIX)/lib/pkgconfig pkg-c
 CFLAGS  := -g -O0 -std=gnu11 -Wall -Wextra -Werror -Wno-comment -DNKVX_WITH_MERCURY -DNKVX_WITH_WASM \
            -I$(TARGET_DIR) -I$(TARGET_DIR)/include -I$(TARGET_DIR)/wasmtime/include \
            -I$(SPDK_ROOT)/include $(MERCURY_CFLAGS)
+
+# Explicit librados library-path knob (slice spdk-7sr.17.11 / J). The host's
+# system /usr/lib64/librados.so is a PARTIAL STUB (~1.4MB) that lacks symbols the
+# executor needs; the real cluster ships a full librados under the Ceph build
+# tree. Default EMPTY (use the system librados via the linker's default search),
+# but allow RADOS_LIB_DIR=/home/kyle/src/ceph/build/lib to link + rpath the real
+# library so the executor serves base KV verbs against the live pool.
+RADOS_LIB_DIR ?=
+ifneq ($(strip $(RADOS_LIB_DIR)),)
+RADOS_LDFLAGS := -L$(RADOS_LIB_DIR) -Wl,-rpath,$(RADOS_LIB_DIR)
+else
+RADOS_LDFLAGS :=
+endif
+
 LDFLAGS := $(MERCURY_LIBS) -Wl,-rpath,$(MERCURY_PREFIX)/lib
 
 # Slice C8 (bead spdk-xmu.8): ASan build of the executor for the on-rig verbs
@@ -110,7 +124,7 @@ UNIT_CFLAGS  := -g -O0 -std=gnu11 -Wall -Wextra -Werror
 all: $(SERVICE) $(CLIENT)
 
 $(SERVICE): $(SERVICE_SRCS) nkvx_executor.h $(HEADER)
-	$(CC) $(CFLAGS) -o $@ $(SERVICE_SRCS) $(SERVICE_LIBS) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $(SERVICE_SRCS) $(SERVICE_LIBS) $(RADOS_LDFLAGS) $(LDFLAGS)
 
 $(CLIENT): nkvx_exec_client.c $(CONTRACT) $(HEADER)
 	$(CC) $(CFLAGS) -o $@ nkvx_exec_client.c $(CONTRACT) $(LDFLAGS)
@@ -118,14 +132,42 @@ $(CLIENT): nkvx_exec_client.c $(CONTRACT) $(HEADER)
 $(UNIT_TEST): nkvx_unit_test.c nkvx_oid.h
 	$(CC) $(UNIT_CFLAGS) -o $@ nkvx_unit_test.c
 
+# Slice spdk-7sr.4 (S3): the RETRIEVE round-trip driver. Drives the SAME
+# nkvx_front_client.c the integrated front uses, against an --mem-object service.
+# Sources come from ../target (front client + contract) and ../target/test (the
+# driver); no RADOS link (it talks to the service over na+sm).
+KV_RETRIEVE_TEST := nkvx_kv_retrieve_test
+$(KV_RETRIEVE_TEST): $(TARGET_DIR)/test/nkvx_kv_retrieve_test.c $(TARGET_DIR)/nkvx_front_client.c \
+                     $(TARGET_DIR)/nkvx_front_client.h $(CONTRACT) $(HEADER)
+	$(CC) $(CFLAGS) -o $@ $(TARGET_DIR)/test/nkvx_kv_retrieve_test.c \
+	      $(TARGET_DIR)/nkvx_front_client.c $(CONTRACT) $(LDFLAGS)
+
+# Slice spdk-7sr.5 (S4): direct executor-verb test. Drives nkvx_executor_kv()
+# against the in-memory backend for STORE/DELETE/EXIST/LIST + SIKE/SINKE + the
+# read-only gate, no Mercury and no Ceph cluster on the data path. Links the
+# executor backend, the reused wasm core (cache-invalidate path) + its log shim,
+# and librados (the wasm core's link dep; the data path uses the mem backend).
+KV_VERBS_TEST := nkvx_kv_verbs_test
+# -I$(CURDIR): nkvx_kv_verbs_test.c (in ../target/test) quote-includes
+# "nkvx_executor.h", which lives HERE in rados-nkvx, so the standalone executor
+# header must be on the search path even though the test source is out-of-dir.
+$(KV_VERBS_TEST): $(TARGET_DIR)/test/nkvx_kv_verbs_test.c nkvx_executor.c nkvx_executor.h \
+                  nkvx_log_shim.c $(TARGET_DIR)/kvdev_rados_nkvx_wasm.c $(CONTRACT) $(HEADER)
+	$(CC) $(CFLAGS) -I$(CURDIR) -o $@ $(TARGET_DIR)/test/nkvx_kv_verbs_test.c nkvx_executor.c nkvx_log_shim.c \
+	      $(TARGET_DIR)/kvdev_rados_nkvx_wasm.c $(CONTRACT) $(SERVICE_LIBS) $(RADOS_LDFLAGS) $(LDFLAGS)
+
 # Build + run the unit tests (the fast, hermetic check).
 test: $(UNIT_TEST)
 	./$(UNIT_TEST)
+
+# Build + run the S4 executor-verb test (no Mercury/Ceph data path needed).
+verbs-test: $(KV_VERBS_TEST)
+	./$(KV_VERBS_TEST)
 
 run: all
 	MERCURY_PREFIX=$(MERCURY_PREFIX) ./nkvx_service_test.sh
 
 clean:
-	rm -f $(SERVICE) $(CLIENT) $(UNIT_TEST)
+	rm -f $(SERVICE) $(CLIENT) $(UNIT_TEST) $(KV_RETRIEVE_TEST) $(KV_VERBS_TEST)
 
-.PHONY: all test run clean
+.PHONY: all test verbs-test run clean
