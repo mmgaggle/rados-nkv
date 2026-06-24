@@ -57,11 +57,21 @@ MERCURY_LIBS    := $(shell PKG_CONFIG_PATH=$(MERCURY_PREFIX)/lib/pkgconfig pkg-c
 # comment that trips -Wcomment under -Werror; SPDK's own build does not gate on it.
 # -DNKVX_WITH_MERCURY: our out-of-tree Mercury build knob (Slice D). The executor
 # always links Mercury, so it is always set here.
+# -DSPDK_CONFIG_WASM: the UNMODIFIED SPDK's config.h carries NO SPDK_CONFIG_WASM
+# (that knob only exists with --with-wasm), so the reused wasm core
+# (../target/kvdev_rados_nkvx_wasm.c) would compile its NOT_SUPPORTED stub and the
+# executor's wasm Exec path (sha256 verify -> INVALID/HASH_MISMATCH, real run) would
+# collapse to NOT_SUPPORTED. We define it here to compile the LIVE dlopen'd wasmtime
+# path against the unmodified SPDK — exactly as Slice G's kvdev_rados_nkvx_ut.mk does
+# for the same core. libwasmtime.so is dlopen'd at run time (put its dir, e.g.
+# /usr/local/lib, on LD_LIBRARY_PATH). The shared wasm core also needs -lcrypto/-ldl,
+# already in SERVICE_LIBS.
 # Include search order: ../target (shared contract + wasm headers, quoted
 # includes), ../target/include (our spdk/kvdev.h — NOT present in unmodified
 # SPDK), ../target/wasmtime/include (wasmtime C-API, dlopen'd), then the
 # unmodified SPDK public headers under SPDK_ROOT/include.
 CFLAGS  := -g -O0 -std=gnu11 -Wall -Wextra -Werror -Wno-comment -DNKVX_WITH_MERCURY \
+           -DSPDK_CONFIG_WASM \
            -I$(TARGET_DIR) -I$(TARGET_DIR)/include -I$(TARGET_DIR)/wasmtime/include \
            -I$(SPDK_ROOT)/include $(MERCURY_CFLAGS)
 LDFLAGS := $(MERCURY_LIBS) -Wl,-rpath,$(MERCURY_PREFIX)/lib
@@ -88,11 +98,27 @@ HEADER   := $(TARGET_DIR)/nkvx_exec_rpc.h
 # the wasmtime C-API headers (dlopen'd at runtime, no link dep), -lcrypto for the
 # sha256 gate, -ldl for dlopen, and a tiny spdk_log shim (the only SPDK runtime
 # symbol the core references). The client never touches RADOS or wasm.
+#
+# CEPH_LIB_DIR: prefer a SOURCE-BUILT Ceph's librados over the distro one. The
+# distro /usr/lib64/librados.so is a thin facade that leaves Ceph-internal C++
+# symbols (MgrClient::*, Objecter::enumerate_objects, ...) UNDEFINED at direct
+# link time, so `-lrados` alone fails to link this executor; the source-built
+# librados (e.g. <ceph>/build/lib) is self-contained and links cleanly. When
+# CEPH_LIB_DIR is set we add -L<dir> + an rpath so the executor both links and
+# runs against that librados. Default to this host's Ceph build; override (or set
+# empty) per environment. Runtime LD_LIBRARY_PATH still wins for resolution order.
+CEPH_LIB_DIR ?= /home/kyle/src/ceph/build/lib
+ifneq ($(CEPH_LIB_DIR),)
+CEPH_LDFLAGS := -L$(CEPH_LIB_DIR) -Wl,-rpath,$(CEPH_LIB_DIR)
+else
+CEPH_LDFLAGS :=
+endif
+
 SERVICE := nkvx_service
 CLIENT  := nkvx_exec_client
 SERVICE_SRCS := nkvx_service.c nkvx_executor.c nkvx_log_shim.c \
                 $(TARGET_DIR)/kvdev_rados_nkvx_wasm.c $(CONTRACT)
-SERVICE_LIBS := -lrados -lcrypto -ldl -lpthread
+SERVICE_LIBS := $(CEPH_LDFLAGS) -lrados -lcrypto -ldl -lpthread
 
 # Fast, dependency-free unit tests for the pure ADR-0014 contract helpers
 # (nkvx_oid.h). Deliberately links NOTHING — no Mercury, librados, or wasm — so

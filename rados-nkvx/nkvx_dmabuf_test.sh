@@ -31,8 +31,12 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RADOS_DIR="$(cd "$HERE/../spdk/module/kvdev/rados" && pwd)"
+# The dma-buf driver moved out-of-tree: it now builds from target/test/ (Slice G's
+# Makefile) against the prebuilt UNMODIFIED SPDK, NOT the deleted in-tree path
+# module/kvdev/rados. See nkvx_c6_test.sh for the TEST_DIR/SPDK_PREBUILT rationale.
+TEST_DIR="$(cd "$HERE/../target/test" && pwd)"
 SPDK_ROOT="$(cd "$HERE/../spdk" && pwd)"
+SPDK_PREBUILT="${SPDK_PREBUILT:-/home/kyle/src/rados-nkv-wt/slice-a/spdk}"
 MERCURY_PREFIX="${MERCURY_PREFIX:-$SPDK_ROOT/vendor/mercury-install}"
 TRANSPORT="${1:-ofi+verbs;ofi_rxm://10.110.0.1}"
 CEPH_CONF="${CEPH_CONF:-/home/kyle/src/ceph/build/ceph.conf}"
@@ -93,13 +97,13 @@ if [ "$IS_VERBS" -eq 1 ]; then
 fi
 
 echo "== building executor + dma-buf driver =="
-make -C "$HERE" -f Makefile MERCURY_PREFIX="$MERCURY_PREFIX" >/dev/null \
+make -C "$HERE" -f Makefile SPDK_ROOT="$SPDK_PREBUILT" MERCURY_PREFIX="$MERCURY_PREFIX" >/dev/null \
 	|| { echo "FAIL: build executor"; exit 1; }
-make -C "$RADOS_DIR" -f Makefile.dmabuf.ut MERCURY_PREFIX="$MERCURY_PREFIX" >/dev/null \
+make -C "$TEST_DIR" nkvx_front_dmabuf_test SPDK_ROOT="$SPDK_PREBUILT" MERCURY_PREFIX="$MERCURY_PREFIX" >/dev/null \
 	|| { echo "FAIL: build dma-buf driver"; exit 1; }
 
 SVC="$HERE/nkvx_service"
-DRV="$RADOS_DIR/nkvx_front_dmabuf_test"
+DRV="$TEST_DIR/nkvx_front_dmabuf_test"
 
 BIGKEY="nkvxDmabuf"
 BIGOID="$(printf '%s' "$BIGKEY" | od -An -tx1 | tr -d ' \n')"
