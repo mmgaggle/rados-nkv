@@ -549,8 +549,15 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 		    struct iovec *iovs, int iovcnt)
 {
 	const struct spdk_nvme_cmd *cmd = &bdev_io->u.nvme_passthru.cmd;
-	uint32_t op_id = cmd->cdw13_bits.kv_exec.op_id;
-	uint32_t osize = cmd->cdw12_bits.kv_exec.osize;
+	/*
+	 * Decode KV Exec (0x83) op_id/osize from the RAW CDW12/CDW13 dwords via our
+	 * out-of-tree ABI helper (spdk/kvdev.h). We do NOT read cmd->cdw1x_bits.kv_exec
+	 * because those union members are our vendor additions, absent in unmodified
+	 * upstream SPDK; CDW12 = osize:32 and CDW13 = op_id:32 each fill a whole dword.
+	 */
+	struct spdk_kv_exec_cmd exec = spdk_kv_exec_decode(cmd->cdw12, cmd->cdw13);
+	uint32_t op_id = exec.op_id;
+	uint32_t osize = exec.osize;
 	const struct kvrados_exec_binding *e;
 	struct kvrados_resolved_binding b;
 	char cls_buf[64];
@@ -560,23 +567,6 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 	uint32_t out_len = 0;
 	uint8_t *input_bounce = NULL;
 	struct kvrados_kv_io_ctx *kctx;
-	/*
-	 * VRAM-direct dma-buf result sink (beads spdk-7sr.8), relayed across the
-	 * passthru boundary by the nvmf shim (nvmf_bdev_ctrlr_nvme_passthru_io ->
-	 * spdk_bdev_nvme_iov_passthru_md_dmabuf). dmabuf_fd < 0 == no sink (the
-	 * unchanged host-VA result path). When >= 0, the Exec result is RDMA-WRITTEN
-	 * by the executor straight into the dma-buf (GPU VRAM), NOT into a host VA;
-	 * the dma-buf segment is the LAST iov (sentinel VA, never CPU-read), and only
-	 * the leading RAM head iov(s) carry [u16 key_len][key][input]. Mirrors the
-	 * legacy ctrlr_kvdev.c mixed-SGL handling.
-	 */
-	int dmabuf_fd = bdev_io->u.nvme_passthru.dmabuf_sink_fd;
-	/* dmabuf_off is consumed only on the Mercury dma-buf forward path below; mark
-	 * it maybe-unused so the --without-mercury build stays warning-clean. */
-	uint64_t dmabuf_off __attribute__((unused)) =
-		bdev_io->u.nvme_passthru.dmabuf_sink_offset;
-	uint32_t dmabuf_len = bdev_io->u.nvme_passthru.dmabuf_sink_len;
-	uint8_t dmabuf_iovidx = bdev_io->u.nvme_passthru.dmabuf_sink_iovidx;
 	uint64_t head_payload = payload_len;
 
 	if (key_len == 0) {
@@ -585,55 +575,7 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 		return;
 	}
 
-	/*
-	 * dma-buf MIXED-SGL shape guard (mirrors ctrlr_kvdev.c): require the
-	 * [RAM head segment(s) ...][dma-buf body] layout — at least one RAM head iov
-	 * precedes the dma-buf segment (iovidx >= 1, so there is a key+input to
-	 * parse) and the dma-buf segment is the LAST iov (iovidx == iovcnt - 1).
-	 * Reject any other shape (all-VRAM with no key, non-trailing dma-buf) with a
-	 * clean status. The non-dma-buf path is untouched (dmabuf_fd < 0).
-	 */
-	if (dmabuf_fd >= 0 &&
-	    (dmabuf_iovidx < 1 || iovcnt < 1 || dmabuf_iovidx != (uint8_t)(iovcnt - 1))) {
-		SPDK_ERRLOG("%s: KV EXEC dma-buf sink: unsupported SGL shape "
-			    "(iovidx=%u iovcnt=%d); require [RAM head][dma-buf body]\n",
-			    kvrados->disk.name, dmabuf_iovidx, iovcnt);
-		spdk_bdev_io_complete_nvme_status(bdev_io, 0, SPDK_NVME_SCT_GENERIC,
-						  SPDK_NVME_SC_DATA_SGL_LENGTH_INVALID);
-		return;
-	}
-
-	/*
-	 * Sub-inline dma-buf sink reject (silent-data-loss guard, mirrors
-	 * ctrlr_kvdev.c): a sink whose declared length is <= the inline cap would let
-	 * the result ride inline and be DROPPED by the dma-buf forward (which has no
-	 * host_out fallback) yet still complete SUCCESS. sink_len is guest-controlled,
-	 * so fail it loudly BEFORE dispatch.
-	 */
-	if (dmabuf_fd >= 0 && dmabuf_len <= SPDK_KVDEV_DMABUF_SINK_MIN_LEN) {
-		SPDK_ERRLOG("%s: KV EXEC dma-buf sink length %u <= inline cap %u: "
-			    "result would ride inline and be dropped; rejecting\n",
-			    kvrados->disk.name, dmabuf_len,
-			    (uint32_t)SPDK_KVDEV_DMABUF_SINK_MIN_LEN);
-		spdk_bdev_io_complete_nvme_status(bdev_io, 0, SPDK_NVME_SCT_GENERIC,
-						  SPDK_NVME_SC_DATA_SGL_LENGTH_INVALID);
-		return;
-	}
-
-	/*
-	 * For the dma-buf path the key+input live ENTIRELY in the leading RAM head
-	 * iov(s) (iov[0 .. iovidx-1]); the trailing dma-buf iov is the result sink and
-	 * its sentinel VA must never be read. Bound the input parse to the RAM head
-	 * byte length, not the full SGL (which includes the dma-buf body).
-	 */
-	if (dmabuf_fd >= 0) {
-		int i;
-
-		head_payload = 0;
-		for (i = 0; i < dmabuf_iovidx; i++) {
-			head_payload += iovs[i].iov_len;
-		}
-	}
+	/* TODO(memory_domain): dma-buf result sink, spdk-7sr follow-up */
 
 	/* (1) Allowlist gate (ADR-0008 D4): deny-by-default per (namespace, op_id). */
 	e = kvrados_exec_op_allowed(kvrados, op_id);
@@ -660,10 +602,8 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 	}
 
 	/*
-	 * (3) input = payload after the key head. For the host-VA path the result
-	 * sink is the host buffer after the input; for the dma-buf path the result
-	 * sink is the dma-buf (out_buf stays NULL — the sentinel VA is never written)
-	 * and input is bounded to the RAM head (head_payload).
+	 * (3) input = payload after the key head. The result sink is the host buffer
+	 * after the input (host-VA path); osize bounds how many bytes are copied back.
 	 */
 	if (head_payload > value_off) {
 		uint64_t ilen = head_payload - value_off;
@@ -684,9 +624,8 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 		}
 	}
 
-	/* Host-VA result sink only when there is NO dma-buf sink (dma-buf body is
-	 * written by the executor's RDMA WRITE, never as a host VA). */
-	if (dmabuf_fd < 0 && iovcnt >= 1 && iovs[0].iov_len > value_off) {
+	/* Host-VA result sink: the host buffer after the input, bounded by osize. */
+	if (iovcnt >= 1 && iovs[0].iov_len > value_off) {
 		out_buf = (uint8_t *)iovs[0].iov_base + value_off;
 		out_len = (uint32_t)spdk_min(iovs[0].iov_len - value_off, (uint64_t)osize);
 	}
@@ -717,14 +656,12 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 	 * with no Ceph and no Mercury. Anything else (rados-backed built-ins, cold-fetch
 	 * wasm, cls) needs the standalone executor over Mercury.
 	 */
-	if (dmabuf_fd < 0 &&
-	    b.runtime == SPDK_KV_EXEC_RUNTIME_NKVX && b.module_ns != NULL &&
+	if (b.runtime == SPDK_KV_EXEC_RUNTIME_NKVX && b.module_ns != NULL &&
 	    strcmp(b.module_ns, "nkvx") == 0) {
 		uint32_t result_len = 0, deliver_len = 0;
 		enum spdk_kvdev_io_status st;
 
-		/* Native built-ins write a host VA out_buf; a dma-buf sink has no host
-		 * VA, so the dma-buf path always rides the Mercury forward_dmabuf below. */
+		/* Native built-ins write a host VA out_buf in-process (no backend). */
 		st = kvrados_native_builtin_exec(b.module_key, input, input_len,
 						 out_buf, out_len, &result_len, &deliver_len);
 		if (st != SPDK_KVDEV_IO_STATUS_NOT_SUPPORTED) {
@@ -753,34 +690,17 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 		 * encoded synchronously, but large input (> NKVX_INLINE_MAX) is registered
 		 * as a bulk PULL source. kctx owns input_bounce and frees it at completion.
 		 *
-		 * VRAM-direct (beads spdk-7sr.8): when the transport relayed a dma-buf
-		 * result sink (dmabuf_fd >= 0), forward via the dma-buf variant so the
-		 * executor RDMA-WRITEs the result straight into the dma-buf (GPU VRAM)
-		 * via libfabric FI_MR_DMABUF, instead of into a host VA out_buf. The sink
-		 * VA passed is the dma-buf segment's advertised base (the sentinel — the
-		 * MR is taken from the fd at dmabuf_off, NOT dereferenced). osize bounds
-		 * the result; the sink length cap was validated above.
+		 * TODO(memory_domain): dma-buf result sink, spdk-7sr follow-up — the
+		 * VRAM-direct variant (executor RDMA-WRITEs the result into a dma-buf via
+		 * libfabric FI_MR_DMABUF instead of a host VA) is re-added via memory_domain
+		 * in a separate slice. The KV Exec still forwards via the normal host-VA path.
 		 */
-		if (dmabuf_fd >= 0) {
-			void *sink_va = (iovcnt >= 1) ? iovs[dmabuf_iovidx].iov_base : NULL;
-			uint32_t sink_len = (uint32_t)spdk_min((uint64_t)dmabuf_len,
-							       (uint64_t)osize);
-
-			frc = kvdev_rados_nkvx_front_forward_dmabuf(kch->front, key, key_len,
-					op_id, kvrados->read_only, (uint8_t)b.runtime,
-					b.module_key, b.module_ns,
-					sha, b.sha256_valid, b.caps,
-					input, input_len,
-					sink_va, sink_len, dmabuf_fd, dmabuf_off,
-					kvrados_exec_done, kctx, &kctx->cancel_token);
-		} else {
-			frc = kvdev_rados_nkvx_front_forward(kch->front, key, key_len, op_id,
-							     kvrados->read_only, (uint8_t)b.runtime,
-							     b.module_key, b.module_ns,
-							     sha, b.sha256_valid, b.caps,
-							     input, input_len, out_buf, out_len,
-							     kvrados_exec_done, kctx, &kctx->cancel_token);
-		}
+		frc = kvdev_rados_nkvx_front_forward(kch->front, key, key_len, op_id,
+						     kvrados->read_only, (uint8_t)b.runtime,
+						     b.module_key, b.module_ns,
+						     sha, b.sha256_valid, b.caps,
+						     input, input_len, out_buf, out_len,
+						     kvrados_exec_done, kctx, &kctx->cancel_token);
 		if (frc != 0) {
 			SPDK_ERRLOG("%s: KV EXEC forward failed: %d\n", kvrados->disk.name, frc);
 			kvrados_exec_complete(kctx, SPDK_KVDEV_IO_STATUS_FAILED, 0);
