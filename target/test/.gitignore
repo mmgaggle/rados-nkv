@@ -1,0 +1,13 @@
+# Out-of-tree KV test-suite build artifacts (target/test/Makefile).
+# CUnit suites (built via SPDK's mk/spdk.unittest.mk through the *.mk stubs):
+/kvrados_ut
+/kvdev_rados_nkvx_ut
+# Standalone suites:
+/nkvx_exec_rpc_ut
+/nkvx_kv_verbs_test
+/nkvx_kv_retrieve_test
+/nkvx_front_dmabuf_test
+# Harness intermediates (objects + dep files + the per-TU obj subdir):
+*.o
+*.d
+/test/
