@@ -32,8 +32,11 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RADOS_DIR="$(cd "$HERE/../spdk/module/kvdev/rados" && pwd)"
+# Front driver builds out-of-tree from target/test/ against the prebuilt UNMODIFIED
+# SPDK (the in-tree module/kvdev/rados path was deleted). See nkvx_c6_test.sh.
+TEST_DIR="$(cd "$HERE/../target/test" && pwd)"
 SPDK_ROOT="$(cd "$HERE/../spdk" && pwd)"
+SPDK_PREBUILT="${SPDK_PREBUILT:-/home/kyle/src/rados-nkv-wt/slice-a/spdk}"
 MERCURY_PREFIX="${MERCURY_PREFIX:-$SPDK_ROOT/vendor/mercury-install}"
 TRANSPORT="${1:-na+sm://}"
 CEPH_CONF="${CEPH_CONF:-/home/kyle/src/ceph/build/ceph.conf}"
@@ -42,11 +45,11 @@ KVPOOL="${KVPOOL:-kvpool}"
 
 export LD_LIBRARY_PATH="$MERCURY_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
-make -C "$HERE" -f Makefile MERCURY_PREFIX="$MERCURY_PREFIX" >/dev/null || { echo "FAIL: build executor"; exit 1; }
-make -C "$RADOS_DIR" -f Makefile.front.ut MERCURY_PREFIX="$MERCURY_PREFIX" >/dev/null || { echo "FAIL: build front driver"; exit 1; }
+make -C "$HERE" -f Makefile SPDK_ROOT="$SPDK_PREBUILT" MERCURY_PREFIX="$MERCURY_PREFIX" RADOS_LIB_DIR="${RADOS_LIB_DIR:-/home/kyle/src/ceph/build/lib}" >/dev/null || { echo "FAIL: build executor"; exit 1; }
+make -C "$TEST_DIR" nkvx_front_client_test SPDK_ROOT="$SPDK_PREBUILT" MERCURY_PREFIX="$MERCURY_PREFIX" >/dev/null || { echo "FAIL: build front driver"; exit 1; }
 
 SVC="$HERE/nkvx_service"
-DRV="$RADOS_DIR/nkvx_front_client_test"
+DRV="$TEST_DIR/nkvx_front_client_test"
 
 case "$TRANSPORT" in
 	na+sm*) FRONT_NA="na+sm://" ;;
