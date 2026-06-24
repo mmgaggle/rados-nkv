@@ -10,9 +10,10 @@
 # kvdev_rados.h — all now under $(TARGET_DIR) — so -I$(TARGET_DIR) resolves the
 # quoted includes and -I$(TARGET_DIR)/include resolves our out-of-tree spdk/kvdev.h.
 #
-# Real-wasm path: unmodified SPDK's config.h carries no SPDK_CONFIG_WASM (that knob
-# only exists with --with-wasm), so we define it here to compile the live wasmtime
-# path (vs the NOT_SUPPORTED stub). -I.../wasmtime/include for the dlopen'd C-API
+# Real-wasm path: unmodified SPDK has no wasm configure knob, so the wasm core is
+# gated on OUR out-of-tree macro NKVX_WITH_WASM (Slice K, parallel to
+# NKVX_WITH_MERCURY). We define it here to compile the live wasmtime path (vs the
+# NOT_SUPPORTED stub). -I.../wasmtime/include for the dlopen'd C-API
 # headers, -ldl for dlopen, -lcrypto for the sha256 verify gate, and
 # -DNKVX_UT_WASM_DIR pointing at the checked-in .wasm fixtures. libwasmtime.so is
 # dlopen'd at run time (LD_LIBRARY_PATH must include its dir, e.g. /usr/local/lib).
@@ -27,7 +28,7 @@ TEST_FILE = kvdev_rados_nkvx_ut.c
 CFLAGS += -I$(TARGET_DIR)
 CFLAGS += -I$(TARGET_DIR)/include
 CFLAGS += -I$(TARGET_DIR)/wasmtime/include
-CFLAGS += -DSPDK_CONFIG_WASM
+CFLAGS += -DNKVX_WITH_WASM
 CFLAGS += -DNKVX_UT_WASM_DIR=\"$(WASM_DIR)\"
 LDFLAGS += -ldl
 LIBS += -lcrypto

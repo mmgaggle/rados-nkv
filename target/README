@@ -19,7 +19,17 @@ not SPDK's generated spdk/config.h:
       because Mercury support used to be compiled into our SPDK fork via
       `./configure --with-mercury`. In the out-of-tree world there is no such fork.
 
-  SPDK_CONFIG_WASM  (still SPDK's — left as-is)
-      The WASM Exec-runtime guard in kvdev_rados_nkvx_wasm.c comes from SPDK's
-      config.h and is unrelated to the Mercury knob above; it is intentionally NOT
-      renamed here.
+  NKVX_WITH_WASM
+      Gates the dlopen-backed wasmtime Exec runtime in kvdev_rados_nkvx_wasm.c.
+      Define it by passing -DNKVX_WITH_WASM from the build (the executor's
+      rados-nkvx/Makefile, which IS the real-wasm runtime, and the kvdev unit-test
+      mk target/test/kvdev_rados_nkvx_ut.mk). Without the macro the wasm core
+      collapses to its NOT_SUPPORTED stub and real KV-Exec returns -7. libwasmtime.so
+      is dlopen'd lazily at runtime from /usr/local/lib (no link dependency); the
+      wasmtime C-API headers under target/wasmtime/include supply only signatures.
+
+      Replaces the former in-tree SPDK_CONFIG_* wasm macro, which only existed because
+      WASM support used to be compiled into our SPDK fork via `./configure
+      --with-wasm`. In the out-of-tree world (UNMODIFIED SPDK) there is no such knob,
+      so the wasm core gates on OUR macro instead (Slice K, parallel to
+      NKVX_WITH_MERCURY).
