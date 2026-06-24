@@ -6,6 +6,7 @@
 /nkvx_exec_rpc_ut
 /nkvx_kv_verbs_test
 /nkvx_kv_retrieve_test
+/nkvx_front_client_test
 /nkvx_front_dmabuf_test
 # Harness intermediates (objects + dep files + the per-TU obj subdir):
 *.o
