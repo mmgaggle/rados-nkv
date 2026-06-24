@@ -146,7 +146,7 @@ fi
 
 echo "== S2 dma-buf e2e (transport=$TRANSPORT front=$DRV_LISTEN osize=$OSIZE iters=$ITERS) =="
 "${NS_PREFIX[@]}" "$DRV" --listen "$DRV_LISTEN" --addr-file "$ADDR_FILE" \
-	--key "$BIGKEY" --runtime 2 --module-ns nkvx --module identity \
+	--key "$BIGKEY" --runtime 1 --module-ns nkvx --module identity \
 	--osize "$OSIZE" --iters "$ITERS" --expect-sha256 "$BIGSHA" 2>&1 | sed 's/^/  /'
 rc=${PIPESTATUS[0]}
 

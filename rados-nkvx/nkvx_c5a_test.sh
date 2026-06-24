@@ -68,7 +68,7 @@ run() { # desc, expect-status, expect-result, module
 	[ "$eres" != "-" ] && extra=(--expect-result "$eres")
 	echo "--- $desc ---"
 	"$HERE/nkvx_exec_client" --listen "$TRANSPORT" --addr-file "$ADDR_FILE" \
-		--key "$KEY" --runtime 2 --module-ns nkvx --module "$mod" \
+		--key "$KEY" --runtime 1 --module-ns nkvx --module "$mod" \
 		--expect "$est" "${extra[@]}" || fail=1
 }
 
@@ -77,11 +77,11 @@ run "identity -> $LEN bytes" 0 "$LEN" identity
 
 echo "--- missing key -> KEY_NOT_EXIST ---"
 "$HERE/nkvx_exec_client" --listen "$TRANSPORT" --addr-file "$ADDR_FILE" \
-	--key "absent-key-xyz" --runtime 2 --module-ns nkvx --module bytecount --expect -2 || fail=1
+	--key "absent-key-xyz" --runtime 1 --module-ns nkvx --module bytecount --expect -2 || fail=1
 
 echo "--- unknown built-in -> NOT_SUPPORTED ---"
 "$HERE/nkvx_exec_client" --listen "$TRANSPORT" --addr-file "$ADDR_FILE" \
-	--key "$KEY" --runtime 2 --module-ns nkvx --module no_such_module --expect -7 || fail=1
+	--key "$KEY" --runtime 1 --module-ns nkvx --module no_such_module --expect -7 || fail=1
 
 echo "--- executor log ---"; cat "$SVC_LOG"
 if [ "$fail" -ne 0 ]; then echo "RESULT: FAIL"; exit 1; fi
