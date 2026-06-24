@@ -60,6 +60,52 @@ extern "C" {
  */
 #define SPDK_KVDEV_DMABUF_SINK_MIN_LEN 4096
 
+/*
+ * KV Exec (0x83) wire ABI — our vendor extension to the NVMe Key-Value command
+ * set (ADR-0005/0014). Unmodified upstream SPDK ships the five STANDARD KV
+ * opcodes (Store 0x01, Retrieve 0x02, List 0x06, Delete 0x10, Exist 0x14) in
+ * <spdk/nvme_spec.h>, but NOT KV Exec and NOT the cdw12/cdw13 union members that
+ * name its fields. This header fills exactly that gap so the out-of-tree
+ * bdev_kvrados forwarder builds against UNMODIFIED SPDK: do NOT add this opcode
+ * or these fields to any upstream header.
+ *
+ * Command layout (matching the in-tree fork's union spdk_nvme_cmd_cdw12/cdw13):
+ *   - CDW12 = osize: 32  (host output buffer cap, bytes; full 32-bit field)
+ *   - CDW13 = op_id: 32  (operation identifier selecting the server-side op;
+ *                         full 32-bit field — the data-object key rides
+ *                         length-prefixed in the DPTR payload, NOT the inline
+ *                         CDW slots, per ADR-0014)
+ * Because each field occupies the whole dword, decode is a straight read of the
+ * RAW cmd->cdw12 / cmd->cdw13 uint32 values. We deliberately do NOT redefine the
+ * spec's cdw12_bits/cdw13_bits unions (those belong to <spdk/nvme_spec.h>);
+ * instead spdk_kv_exec_decode() pulls op_id/osize from the raw dwords so callers
+ * need no upstream-header change.
+ */
+#define SPDK_NVME_OPC_KV_EXEC 0x83
+
+/** Decoded KV Exec (0x83) command-specific fields (from raw CDW12/CDW13). */
+struct spdk_kv_exec_cmd {
+	uint32_t op_id;	/**< CDW13: operation identifier (server-side op selector). */
+	uint32_t osize;	/**< CDW12: host output buffer cap in bytes. */
+};
+
+/**
+ * Decode a KV Exec command's op_id/osize from the raw CDW12/CDW13 dwords.
+ *
+ * \param cdw12 Raw value of NVMe command dword 12 (osize).
+ * \param cdw13 Raw value of NVMe command dword 13 (op_id).
+ * \return The decoded fields.
+ */
+static inline struct spdk_kv_exec_cmd
+spdk_kv_exec_decode(uint32_t cdw12, uint32_t cdw13)
+{
+	struct spdk_kv_exec_cmd out;
+
+	out.osize = cdw12;	/* CDW12 = osize:32 (full dword) */
+	out.op_id = cdw13;	/* CDW13 = op_id:32 (full dword) */
+	return out;
+}
+
 struct spdk_kvdev;
 struct spdk_kvdev_desc;
 struct spdk_kvdev_module;

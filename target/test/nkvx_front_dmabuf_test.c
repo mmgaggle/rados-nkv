@@ -118,7 +118,7 @@ parse_hex(const char *hex, unsigned char *out, size_t out_len)
  * negative on failure.
  */
 static int
-make_udmabuf_sink(size_t size, void **map, int *memfd_out)
+make_udmabuf_region(size_t size, void **map, int *memfd_out)
 {
 	struct udmabuf_create create;
 	long page = sysconf(_SC_PAGESIZE);
@@ -269,7 +269,7 @@ main(int argc, char **argv)
 	/* The dma-buf result_sink (udmabuf-backed) + its mmap for readback. */
 	void *sink_map = NULL;
 	int sink_memfd = -1;
-	int dmabuf_fd = make_udmabuf_sink((size_t)osize, &sink_map, &sink_memfd);
+	int dmabuf_fd = make_udmabuf_region((size_t)osize, &sink_map, &sink_memfd);
 	if (dmabuf_fd < 0) {
 		return 1;
 	}
