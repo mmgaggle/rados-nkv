@@ -56,8 +56,12 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RADOS_DIR="$(cd "$HERE/../spdk/module/kvdev/rados" && pwd)"
+# Front driver builds out-of-tree from target/test/ against the prebuilt UNMODIFIED
+# SPDK (the in-tree module/kvdev/rados path was deleted). The target/test Makefile
+# carries the same ASAN=1/CC toggle the old Makefile.front.ut had. See nkvx_c6_test.sh.
+TEST_DIR="$(cd "$HERE/../target/test" && pwd)"
 SPDK_ROOT="$(cd "$HERE/../spdk" && pwd)"
+SPDK_PREBUILT="${SPDK_PREBUILT:-/home/kyle/src/rados-nkv-wt/slice-a/spdk}"
 MERCURY_PREFIX="${MERCURY_PREFIX:-$SPDK_ROOT/vendor/mercury-install}"
 TRANSPORT="${1:-ofi+verbs;ofi_rxm://10.110.0.1}"
 CEPH_CONF="${CEPH_CONF:-/home/kyle/src/ceph/build/ceph.conf}"
@@ -138,13 +142,17 @@ if [ "$NKVX_ASAN" = "1" ]; then
 fi
 
 echo "== building executor + front driver [$ASAN_TAG] =="
-make -C "$HERE" -f Makefile "${MAKE_ARGS[@]}" clean >/dev/null 2>&1
-make -C "$RADOS_DIR" -f Makefile.front.ut "${MAKE_ARGS[@]}" clean >/dev/null 2>&1
-make -C "$HERE" -f Makefile "${MAKE_ARGS[@]}" >/dev/null || { echo "FAIL: build executor [$ASAN_TAG]"; exit 1; }
-make -C "$RADOS_DIR" -f Makefile.front.ut "${MAKE_ARGS[@]}" >/dev/null || { echo "FAIL: build front driver [$ASAN_TAG]"; exit 1; }
+# The front driver shares the ASan/normal output path, so force a fresh build with
+# the requested flavor every run (mirrors the old in-tree behaviour). The target/test
+# Makefile only removes the standalone driver binaries on `clean nkvx_front_client_test`,
+# so we just rm the binary to force a rebuild without nuking the CUnit suites.
+make -C "$HERE" -f Makefile SPDK_ROOT="$SPDK_PREBUILT" "${MAKE_ARGS[@]}" clean >/dev/null 2>&1
+rm -f "$TEST_DIR/nkvx_front_client_test"
+make -C "$HERE" -f Makefile SPDK_ROOT="$SPDK_PREBUILT" "${MAKE_ARGS[@]}" >/dev/null || { echo "FAIL: build executor [$ASAN_TAG]"; exit 1; }
+make -C "$TEST_DIR" nkvx_front_client_test SPDK_ROOT="$SPDK_PREBUILT" "${MAKE_ARGS[@]}" >/dev/null || { echo "FAIL: build front driver [$ASAN_TAG]"; exit 1; }
 
 SVC="$HERE/nkvx_service"
-DRV="$RADOS_DIR/nkvx_front_client_test"
+DRV="$TEST_DIR/nkvx_front_client_test"
 
 # ---------------------------------------------------------------------------
 # Fixtures.

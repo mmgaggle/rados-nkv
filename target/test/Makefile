@@ -65,6 +65,17 @@ STD_CFLAGS := -g -O0 -std=gnu11 -Wall -Wextra -Werror -Wno-comment -DNKVX_WITH_M
               -I$(RADOS_NKVX) -I$(SPDK_ROOT)/include $(MERCURY_CFLAGS)
 STD_LDFLAGS := $(MERCURY_LIBS) -Wl,-rpath,$(MERCURY_PREFIX)/lib
 
+# Slice C8 (bead spdk-xmu.8): `make ASAN=1 [CC=clang]` instruments the standalone
+# FRONT driver(s) (origin-side cancel/teardown) with AddressSanitizer so the abort
+# path is ASan-clean alongside the executor under the C8 harness. Mirrors the old
+# in-tree Makefile.front.ut / Makefile.dmabuf.ut ASAN toggle. The ASan and normal
+# builds share the output path, so they are not co-resident (the harness rebuilds
+# with the flavor it needs).
+ifeq ($(ASAN),1)
+STD_CFLAGS  += -fsanitize=address -fno-omit-frame-pointer
+STD_LDFLAGS += -fsanitize=address
+endif
+
 # ---- Shared out-of-tree sources ---------------------------------------------
 CONTRACT      := $(TARGET_DIR)/nkvx_exec_rpc.c
 WASM_CORE     := $(TARGET_DIR)/kvdev_rados_nkvx_wasm.c
@@ -74,7 +85,8 @@ LOG_SHIM      := $(RADOS_NKVX)/nkvx_log_shim.c
 
 # ---- Suite binaries ---------------------------------------------------------
 CUNIT_SUITES      := kvrados_ut kvdev_rados_nkvx_ut
-STANDALONE_SUITES := nkvx_exec_rpc_ut nkvx_kv_verbs_test nkvx_kv_retrieve_test nkvx_front_dmabuf_test
+STANDALONE_SUITES := nkvx_exec_rpc_ut nkvx_kv_verbs_test nkvx_kv_retrieve_test \
+                     nkvx_front_client_test nkvx_front_dmabuf_test
 
 .PHONY: all run clean $(CUNIT_SUITES)
 .DEFAULT_GOAL := all
@@ -108,6 +120,14 @@ nkvx_kv_verbs_test: nkvx_kv_verbs_test.c $(EXECUTOR) $(LOG_SHIM) $(WASM_CORE) $(
 nkvx_kv_retrieve_test: nkvx_kv_retrieve_test.c $(FRONT_CLIENT) $(CONTRACT)
 	$(CC) $(STD_CFLAGS) -o $@ nkvx_kv_retrieve_test.c $(FRONT_CLIENT) \
 	      $(CONTRACT) $(STD_LDFLAGS)
+
+# nkvx_front_client_test: the REAL front Mercury client driver (Slice C4/C6/C6b/C7/
+# C8 acceptance). Mirrors the old in-tree Makefile.front.ut link set (front client +
+# contract directly against Mercury, -lcrypto for the C7 delivered-bytes sha gate).
+# The nkvx_c6/c6b/c6b_f1f2/c7/c8 harnesses drive this binary against a live executor.
+nkvx_front_client_test: nkvx_front_client_test.c $(FRONT_CLIENT) $(CONTRACT)
+	$(CC) $(STD_CFLAGS) -o $@ nkvx_front_client_test.c $(FRONT_CLIENT) \
+	      $(CONTRACT) -lcrypto $(STD_LDFLAGS)
 
 # nkvx_front_dmabuf_test: the non-GPU dma-buf bulk-path proof. BUILD-only here.
 # Mirrors Makefile.dmabuf.ut (front client + contract, -lcrypto for the sha gate).
