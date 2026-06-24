@@ -57,11 +57,16 @@ MERCURY_LIBS    := $(shell PKG_CONFIG_PATH=$(MERCURY_PREFIX)/lib/pkgconfig pkg-c
 # comment that trips -Wcomment under -Werror; SPDK's own build does not gate on it.
 # -DNKVX_WITH_MERCURY: our out-of-tree Mercury build knob (Slice D). The executor
 # always links Mercury, so it is always set here.
+# -DNKVX_WITH_WASM: our out-of-tree WASM build knob (Slice K). Unmodified SPDK has
+# no wasm configure knob, so the reused wasm core (kvdev_rados_nkvx_wasm.c) is gated
+# on this macro; without it the core compiles to its NOT_SUPPORTED stub and real
+# KV-Exec returns -7. The executor IS the real-wasm runtime, so it is always set
+# here (libwasmtime.so is still dlopen'd lazily — no link dependency).
 # Include search order: ../target (shared contract + wasm headers, quoted
 # includes), ../target/include (our spdk/kvdev.h — NOT present in unmodified
 # SPDK), ../target/wasmtime/include (wasmtime C-API, dlopen'd), then the
 # unmodified SPDK public headers under SPDK_ROOT/include.
-CFLAGS  := -g -O0 -std=gnu11 -Wall -Wextra -Werror -Wno-comment -DNKVX_WITH_MERCURY \
+CFLAGS  := -g -O0 -std=gnu11 -Wall -Wextra -Werror -Wno-comment -DNKVX_WITH_MERCURY -DNKVX_WITH_WASM \
            -I$(TARGET_DIR) -I$(TARGET_DIR)/include -I$(TARGET_DIR)/wasmtime/include \
            -I$(SPDK_ROOT)/include $(MERCURY_CFLAGS)
 LDFLAGS := $(MERCURY_LIBS) -Wl,-rpath,$(MERCURY_PREFIX)/lib

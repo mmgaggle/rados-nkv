@@ -202,7 +202,7 @@ test_nkvx_wasm_bytecount_offreactor(void)
 
 	CU_ASSERT(kvdev_rados_nkvx_start() == 0);
 
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 #endif
 
@@ -241,7 +241,7 @@ test_nkvx_wasm_bytecount_offreactor(void)
  * bytecount wasm test. Caps are sourced per-invocation from env overrides
  * (SPDK_NKVX_WASM_FUEL / _EPOCH_TICKS / _MAX_MEMORY), exactly the TB2 source.
  */
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 #define NKVX_WASM_RUNTIME_TESTS 1
 #endif
 
@@ -492,7 +492,7 @@ nkvx_wasm_runtime_available(void)
 static void
 test_nkvx_tb4_cache_zerocopy_warm(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	/* Generous caps so checksum completes; per-invocation source is env (TB2). */
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
@@ -575,7 +575,7 @@ test_nkvx_tb4_cache_zerocopy_warm(void)
 static void
 test_nkvx_tb4_distinct_object_is_miss(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -714,7 +714,7 @@ test_nkvx_long_key_oid(void)
 	       (size_t)KVDEV_RADOS_NKVX_OID_BUFSZ, strlen(io_oid_a), strlen(io_oid_max));
 }
 
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 /* Mirror of kvdev_rados_key_to_oid for a size_t key_len (the deep wasm test below
  * uses oversized keys); identical hex encoding. */
 static void
@@ -742,7 +742,7 @@ ut_key_to_oid(const void *key, size_t key_len, char *oid)
 static void
 test_nkvx_long_key_oid_distinct(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -844,7 +844,7 @@ test_nkvx_long_key_oid_distinct(void)
 static void
 test_nkvx_tb4_multipage_module_private(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -898,7 +898,7 @@ test_nkvx_tb4_multipage_module_private(void)
 static void
 test_nkvx_tb4_oob_traps(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -957,7 +957,7 @@ test_nkvx_tb4_oob_traps(void)
 static void
 test_nkvx_d1_declared_size_caps_slack(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -1034,7 +1034,7 @@ test_nkvx_d1_declared_size_caps_slack(void)
 static void
 test_nkvx_d2_invalidate_on_mutation(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -1117,7 +1117,7 @@ test_nkvx_d2_invalidate_on_mutation(void)
 static void
 test_nkvx_d2_pin_survives_invalidate(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -1365,7 +1365,7 @@ test_nkvx_tb4_cached_failsoft(void)
 	uint32_t rlen = 0;
 	int rc;
 
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	if (nkvx_wasm_runtime_available()) {
 		/* Runtime present: this test's fail-soft assertion does not apply. */
@@ -1392,7 +1392,7 @@ test_nkvx_tb4_cached_failsoft(void)
 static void
 test_nkvx_tb4_dispatch_wires_cache(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	static const char obj[] = "dispatch-cached-object";
 	const uint32_t obj_len = (uint32_t)sizeof(obj);
 	uint8_t out[64];
@@ -1476,7 +1476,7 @@ test_nkvx_tb4_dispatch_wires_cache(void)
  * Graceful-degradation aware: when the runtime is unavailable these skip, like the
  * other wasm tests.
  * ========================================================================== */
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 
 /* Read a checked-in <name>.wasm into a malloc'd buffer; CU_FAIL + return NULL on
  * error. Caller frees. */
@@ -1500,7 +1500,7 @@ tb3_sha256(const void *buf, size_t len, uint8_t out[SPDK_KV_EXEC_SHA256_LEN])
 {
 	CU_ASSERT(nkvx_sha256(buf, len, out));
 }
-#endif /* SPDK_CONFIG_WASM && NKVX_UT_WASM_DIR */
+#endif /* NKVX_WITH_WASM && NKVX_UT_WASM_DIR */
 
 /*
  * TB3 (a) deny-by-default / hash GATE — sha256 MISMATCH is rejected and the module
@@ -1510,7 +1510,7 @@ tb3_sha256(const void *buf, size_t len, uint8_t out[SPDK_KV_EXEC_SHA256_LEN])
 static void
 test_nkvx_tb3_hash_mismatch_rejected(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	if (!nkvx_wasm_runtime_available()) {
 		printf("\n    wasm runtime unavailable -> TB3 hash-mismatch test skipped\n");
@@ -1571,7 +1571,7 @@ test_nkvx_tb3_hash_mismatch_rejected(void)
 static void
 test_nkvx_tb3_verify_run_and_module_cache_hit(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -1732,7 +1732,7 @@ test_nkvx_wasm_write_capable_read_only_rejected(void)
 static void
 test_nkvx_tb3_miss_without_bytes_fails_closed(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	if (!nkvx_wasm_runtime_available()) {
 		printf("\n    wasm runtime unavailable -> TB3 fail-closed test skipped\n");
@@ -1775,7 +1775,7 @@ test_nkvx_tb3_miss_without_bytes_fails_closed(void)
  * happened (the eviction counter advanced). The default caps are large, so the
  * tests set tight env caps. Helper to run a checksum Exec on a unique key.
  */
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 static int
 wwy_exec_key(const char *key, const uint8_t *obj, size_t obj_len, uint64_t *out_sum)
 {
@@ -1803,7 +1803,7 @@ wwy_exec_key(const char *key, const uint8_t *obj, size_t obj_len, uint64_t *out_
 static void
 test_nkvx_wwy_object_cache_bounded(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -1861,7 +1861,7 @@ done:
 static void
 test_nkvx_wwy_pinned_survives_eviction(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -1939,7 +1939,7 @@ done:
 static void
 test_nkvx_wwy_warm_cache_bounded(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -1993,7 +1993,7 @@ done:
 static void
 test_nkvx_wwy_module_cache_bounded(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_MOD_CACHE_MAX_COUNT", "3", 1);
 	unsetenv("SPDK_NKVX_MOD_CACHE_MAX_BYTES");
@@ -2079,7 +2079,7 @@ done:
 static void
 test_nkvx_yc1_warm_state_isolation(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	setenv("SPDK_NKVX_WASM_FUEL", "100000000", 1);
 	setenv("SPDK_NKVX_WASM_EPOCH_TICKS", "0", 1);
@@ -2157,7 +2157,7 @@ test_nkvx_yc1_warm_state_isolation(void)
 static void
 test_nkvx_epoch_ticker_teardown(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	struct fake_fill fill;
 	static const uint8_t obj[] = "x";
 	uint8_t out[16];
@@ -2268,7 +2268,7 @@ compile_done(void *arg, int kvstatus)
 static void
 test_nkvx_5wi_verify_gate_is_compile_free(void)
 {
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	if (!nkvx_wasm_runtime_available()) {
 		/* Runtime genuinely unavailable: the gate fails soft, never crashes. */
@@ -2348,7 +2348,7 @@ test_nkvx_5wi_dispatch_compile_offreactor(void)
 	CU_ASSERT(rc == -EINVAL);
 	set_thread(INVALID_THREAD);
 
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	if (!nkvx_wasm_runtime_available()) {
 		printf("\n    wasm runtime unavailable -> 5wi dispatch_compile run skipped "
@@ -2446,7 +2446,7 @@ test_nkvx_5wi_stop_drains_inflight_compiles(void)
 
 	CU_ASSERT(kvdev_rados_nkvx_start() == 0);
 
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	setenv(KVDEV_RADOS_NKVX_WASM_DIR_ENV, NKVX_UT_WASM_DIR, 1);
 	if (nkvx_wasm_runtime_available()) {
 		kvdev_rados_nkvx_wasm_module_cache_reset();
@@ -2459,7 +2459,7 @@ test_nkvx_5wi_stop_drains_inflight_compiles(void)
 	 * the worker and back — which is what the ordering test cares about). */
 	for (i = 0; i < 4; i++) {
 		memset(&cr[i], 0, sizeof(cr[i]));
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 		if (wasm != NULL) {
 			tb3_sha256(wasm, wlen, hashes[i]);
 		} else
@@ -2508,7 +2508,7 @@ test_nkvx_5wi_stop_drains_inflight_compiles(void)
 	printf("\n    5wi module_fini ordering: stop() joined the worker AFTER draining %d queued "
 	       "compiles; all completions delivered on the SPDK thread post-join\n", 4);
 
-#if defined(SPDK_CONFIG_WASM) && defined(NKVX_UT_WASM_DIR)
+#if defined(NKVX_WITH_WASM) && defined(NKVX_UT_WASM_DIR)
 	free(wasm);
 	kvdev_rados_nkvx_wasm_module_cache_reset();
 #endif
