@@ -5,8 +5,9 @@
 
 /*
  * Two-tier front bridge (Slice C4): adapts the SPDK kvdev_rados datapath to the
- * Mercury front client core. Compiled only under SPDK_CONFIG_MERCURY (the module
- * Makefile adds this source under CONFIG_MERCURY). See kvdev_rados_nkvx_front.h
+ * Mercury front client core. Compiled only under NKVX_WITH_MERCURY (our
+ * out-of-tree build knob; target/Makefile adds this source and passes
+ * -DNKVX_WITH_MERCURY when Mercury is enabled). See kvdev_rados_nkvx_front.h
  * and docs/design/slice-c-exec-rpc-mercury.md §2/§4.
  */
 
