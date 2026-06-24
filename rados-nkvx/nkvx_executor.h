@@ -21,7 +21,7 @@
 #ifndef NKVX_EXECUTOR_H
 #define NKVX_EXECUTOR_H
 
-#include "nkvx_exec_rpc.h"	/* nkvx_exec_in_t / nkvx_exec_out_t */
+#include "nkvx_exec_rpc.h"	/* nkvx_exec_in_t / nkvx_exec_out_t / nkvx_kv_in_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -72,7 +72,22 @@ void nkvx_exec_result_free(struct nkvx_exec_result *res);
 int nkvx_executor_open(const char *conf, const char *user, const char *pool,
 		       const char *ns, struct nkvx_executor **out);
 
-/** Tear down the executor's librados handle. */
+/**
+ * TEST-ONLY: open an executor backed by an in-memory object table instead of
+ * librados (slice spdk-7sr.4 / S3 verification). Used by the na+sm loopback test
+ * when no Ceph cluster is reachable so the RETRIEVE datapath
+ * (front->RPC->executor->cache->result) can be exercised end-to-end without
+ * librados. Objects are added with nkvx_executor_mem_put(); oid=hex(key) must match
+ * the front's encoding. The real datapath uses nkvx_executor_open() (librados).
+ */
+int nkvx_executor_open_mem(struct nkvx_executor **out);
+
+/** TEST-ONLY: insert/replace an in-memory object (a copy is taken). \p oid is the
+ *  hex-encoded key (== nkvx_key_to_oid output). */
+int nkvx_executor_mem_put(struct nkvx_executor *ex, const char *oid,
+			  const void *value, size_t len);
+
+/** Tear down the executor's librados handle (or the in-memory table). */
 void nkvx_executor_close(struct nkvx_executor *ex);
 
 /**
@@ -101,6 +116,27 @@ void nkvx_executor_close(struct nkvx_executor *ex);
  */
 int nkvx_executor_run(struct nkvx_executor *ex, const nkvx_exec_in_t *in,
 		      struct nkvx_exec_result *res);
+
+/**
+ * Run ONE decoded base-layer KV verb (slice spdk-7sr.4 / S3). Currently the
+ * RETRIEVE verb is implemented: resolve oid=hex(in->key), serve the value from the
+ * shared TB4 object cache on a hit (zero librados) or rados_read + cold-fill it on a
+ * miss, and populate \p res with the TRUE value length (CQE DW0 / truncation
+ * semantics) and a freshly-allocated buffer of the min(result_len, osize) delivered
+ * bytes. The caller (Mercury handler) delivers those bytes inline or via the
+ * result_sink PUSH and frees them with nkvx_exec_result_free().
+ *
+ *   - key missing                     -> res->status = KEY_NOT_EXIST, no body.
+ *   - value_len > osize (truncation)  -> res->status = BUFFER_TOO_SMALL, DW0 = true
+ *                                        length, body = osize bytes.
+ *   - other verbs (Store/Delete/Exist/List) -> NOT_SUPPORTED for now (S4).
+ *
+ * read_only is carried on the wire (ADR-0008) but Retrieve is non-mutating, so it is
+ * always permitted. Always returns 0 with the outcome in res->status; a negative
+ * return is reserved for an internal contract violation.
+ */
+int nkvx_executor_kv(struct nkvx_executor *ex, const nkvx_kv_in_t *in,
+		     struct nkvx_exec_result *res);
 
 #ifdef __cplusplus
 }
