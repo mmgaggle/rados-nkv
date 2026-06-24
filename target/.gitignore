@@ -1,0 +1,3 @@
+# Out-of-tree build artifacts (target/Makefile)
+*.o
+/nkv_tgt
