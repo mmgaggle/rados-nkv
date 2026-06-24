@@ -6,7 +6,7 @@
 #include "spdk/stdinc.h"
 #include "common/lib/test_env.c"
 
-#include "bdev/kvrados/bdev_kvrados.c"
+#include "bdev_kvrados.c"
 
 /*
  * Capture the completion of the bdev_io submitted by the module under test.
