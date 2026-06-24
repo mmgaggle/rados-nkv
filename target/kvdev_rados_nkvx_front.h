@@ -11,7 +11,8 @@
  * This header deliberately pulls in NO Mercury headers — kvdev_rados.c includes
  * it and must stay free of <mercury.h>. `struct nkvx_front` is opaque here; its
  * definition lives in nkvx_front_client.c. The whole bridge (and these symbols)
- * compile only under SPDK_CONFIG_MERCURY; kvdev_rados.c guards every call site
+ * compile only under NKVX_WITH_MERCURY (our out-of-tree build knob, passed via
+ * -DNKVX_WITH_MERCURY by target/Makefile); kvdev_rados.c guards every call site
  * with the same macro so a stock build is byte-identical (design §C4 / §1).
  *
  * Object-flow model (design §2): the front sends KEY-ONLY — key + binding +

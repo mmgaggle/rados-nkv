@@ -5,7 +5,6 @@
 #include "bdev_kvrados.h"
 
 #include "spdk/stdinc.h"
-#include "spdk/config.h"		/* SPDK_CONFIG_MERCURY */
 #include "spdk/endian.h"
 #include "spdk/env.h"
 #include "spdk/likely.h"
@@ -17,7 +16,15 @@
 #include "spdk/thread.h"
 #include "spdk/kvdev.h"			/* enum spdk_kvdev_io_status, spdk_kv_exec_runtime, caps tier */
 
-#ifdef SPDK_CONFIG_MERCURY
+/*
+ * NKVX_WITH_MERCURY gates the Mercury (inter-tier RPC) front-bridge code paths.
+ * In the out-of-tree build, SPDK is UNMODIFIED and has no Mercury support, so WE
+ * own this knob (formerly SPDK's generated SPDK_CONFIG_* mercury macro): it is
+ * defined by passing -DNKVX_WITH_MERCURY from target/Makefile (and the umbrella
+ * rados-nkvx/Makefile), not from SPDK's spdk/config.h. A build without the macro
+ * is byte-identical to a stock (Mercury-less) forwarder.
+ */
+#ifdef NKVX_WITH_MERCURY
 #include "kvdev_rados_nkvx_front.h"	/* the front Mercury bridge (reused from kvdev_rados) */
 #endif
 
@@ -67,7 +74,7 @@ struct kvrados_channel {
 	 * from its own done-cb.
 	 */
 	TAILQ_HEAD(, kvrados_kv_io_ctx)	exec_inflight;
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 	/*
 	 * Per-channel front Mercury client + non-blocking progress poller (reused from
 	 * the kvdev_rados two-tier front, design §4.2). A struct nkvx_front is single-
@@ -244,7 +251,7 @@ kvrados_kvdev_status_to_nvme(enum spdk_kvdev_io_status status, int *sct, int *sc
 	}
 }
 
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 /*
  * Decode the STORE conditional options from CDW11 Request Options (ro) into
  * enum spdk_kvdev_store_flags (mirrors lib/nvmf/ctrlr_kvdev.c): the spec's
@@ -288,7 +295,7 @@ kvrados_retrieve_done(void *cb_arg, int status, uint32_t value_len)
 	spdk_bdev_io_complete_nvme_status(bdev_io, value_len, sct, sc);
 	free(kctx);
 }
-#endif /* SPDK_CONFIG_MERCURY */
+#endif /* NKVX_WITH_MERCURY */
 
 /* ---- KV Exec (0x83): allowlist enforcement + native executor + abort (S5a) -- */
 
@@ -511,14 +518,14 @@ kvrados_exec_complete(struct kvrados_kv_io_ctx *kctx, enum spdk_kvdev_io_status 
 	free(kctx);
 }
 
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 /* KV Exec forward completion (fires from the front progress poller). */
 static void
 kvrados_exec_done(void *cb_arg, int status, uint32_t result_len)
 {
 	kvrados_exec_complete(cb_arg, (enum spdk_kvdev_io_status)status, result_len);
 }
-#endif /* SPDK_CONFIG_MERCURY */
+#endif /* NKVX_WITH_MERCURY */
 
 /*
  * Handle KV Exec (0x83) — the full S5a dispatch (ADR-0008 D4 / ADR-0010/0012/0014).
@@ -729,7 +736,7 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 		/* Not an input-only native built-in: fall through to the Mercury path. */
 	}
 
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 	{
 		const uint8_t *sha = b.sha256_valid ? b.sha256 : NULL;
 		int frc;
@@ -849,7 +856,7 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 							  SPDK_NVME_SC_INVALID_FIELD);
 			return;
 		}
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 		{
 			struct kvrados_channel *kch = spdk_io_channel_get_ctx(ioch);
 			struct kvrados_kv_io_ctx *kctx;
@@ -931,7 +938,7 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 							  SPDK_NVME_SC_INVALID_FIELD);
 			return;
 		}
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 		{
 			struct kvrados_channel *kch = spdk_io_channel_get_ctx(ioch);
 			struct kvrados_kv_io_ctx *kctx;
@@ -1023,7 +1030,7 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 							  SPDK_NVME_SC_INVALID_FIELD);
 			return;
 		}
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 		{
 			struct kvrados_channel *kch = spdk_io_channel_get_ctx(ioch);
 			struct kvrados_kv_io_ctx *kctx;
@@ -1082,7 +1089,7 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 #endif
 	}
 	case SPDK_NVME_OPC_KV_LIST: {
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 		{
 			struct kvrados_channel *kch = spdk_io_channel_get_ctx(ioch);
 			struct kvrados_kv_io_ctx *kctx;
@@ -1272,7 +1279,7 @@ kvrados_handle_abort(struct kvrados_channel *kch, struct spdk_bdev_io *bdev_io)
 
 	TAILQ_FOREACH(kctx, &kch->exec_inflight, exec_link) {
 		if (kctx->bdev_io == to_abort) {
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 			if (kch->front != NULL && kctx->cancel_token != KVDEV_RADOS_NKVX_TOKEN_NONE) {
 				/* Enter the per-command cancel handshake; the progress poller
 				 * resolves it and fires the Exec done-cb (ABORTED) once. */
@@ -1466,7 +1473,7 @@ static const struct spdk_bdev_fn_table kvrados_fn_table = {
 	.write_config_json	= kvrados_write_json_config,
 };
 
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 /* Per-channel Mercury progress poller: drive HG_Progress/HG_Trigger non-blocking on
  * the reactor thread so forward completions fire here (design §4.2). */
 static int
@@ -1487,7 +1494,7 @@ kvrados_create_channel_cb(void *io_device, void *ctx)
 	/* In-flight KV Exec list (for tenant ABORT) — always present. */
 	TAILQ_INIT(&kch->exec_inflight);
 
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 	{
 		struct kvrados_disk *kvrados = io_device;
 
@@ -1527,7 +1534,7 @@ kvrados_destroy_channel_cb(void *io_device, void *ctx)
 
 	(void)io_device;
 
-#ifdef SPDK_CONFIG_MERCURY
+#ifdef NKVX_WITH_MERCURY
 	if (kch->front != NULL) {
 		/* Drain in-flight forwards before tearing the front down (channel-destroy
 		 * teardown — best-effort cancel + bounded drain, then force-fail any
