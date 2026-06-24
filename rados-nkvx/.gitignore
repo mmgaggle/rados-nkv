@@ -1,3 +1,5 @@
 /nkvx_service
 /nkvx_exec_client
 /nkvx_unit_test
+/nkvx_kv_retrieve_test
+/nkvx_kv_verbs_test
