@@ -12,15 +12,117 @@
 #include "spdk/log.h"
 
 /*
- * The bdev_kvrados_create request struct + decoders + free are GENERATED from
- * schema.json into rpc_autogen.h (rpc_bdev_kvrados_create_decoders_autogen /
- * rpc_bdev_kvrados_create_ctx / free_rpc_bdev_kvrados_create). The
- * migrated_decoders set in genrpc.py keeps this file from redefining them.
- * That autogen struct also gives us the structured KV Exec allowlist
- * (rpc_nvmf_kv_exec_allowlist), which we translate into the bdev's
- * kvrados_exec_binding array below.
+ * Out-of-tree build: this module links against UNMODIFIED SPDK, which does not
+ * carry our bdev_kvrados RPC decoders (those used to be generated from
+ * schema.json into an SPDK-internal build artifact). So the request structs,
+ * JSON object decoders, and free helpers are all defined INLINE here, following the
+ * standard out-of-tree SPDK bdev RPC pattern (spdk_json_decode_object with a
+ * local spdk_json_object_decoder[]). Field names / types / optionality mirror
+ * the original schema.json + N3 generated decoders exactly.
  */
-#include "spdk_internal/rpc_autogen.h"
+
+/*
+ * Structured KV Exec allowlist entry (ADR-0005/0012/0014). One JSON object per
+ * permitted KV-Exec operation; decoded into the borrowed kvrados_exec_binding
+ * view in rpc_bdev_kvrados_create() below (the disk deep-copies the strings).
+ */
+struct rpc_nvmf_kv_exec_allow {
+	uint32_t	op_id;
+	char		*binding;
+	char		*runtime;
+	char		*module_namespace;
+	char		*module_key;
+	char		*sha256;
+	uint64_t	caps;
+};
+
+static const struct spdk_json_object_decoder rpc_nvmf_kv_exec_allow_decoders[] = {
+	{"op_id", offsetof(struct rpc_nvmf_kv_exec_allow, op_id), spdk_json_decode_uint32, false},
+	{"binding", offsetof(struct rpc_nvmf_kv_exec_allow, binding), spdk_json_decode_string, true},
+	{"runtime", offsetof(struct rpc_nvmf_kv_exec_allow, runtime), spdk_json_decode_string, true},
+	{"module_namespace", offsetof(struct rpc_nvmf_kv_exec_allow, module_namespace), spdk_json_decode_string, true},
+	{"module_key", offsetof(struct rpc_nvmf_kv_exec_allow, module_key), spdk_json_decode_string, true},
+	{"sha256", offsetof(struct rpc_nvmf_kv_exec_allow, sha256), spdk_json_decode_string, true},
+	{"caps", offsetof(struct rpc_nvmf_kv_exec_allow, caps), spdk_json_decode_uint64, true},
+};
+
+static int
+rpc_decode_nvmf_kv_exec_allow(const struct spdk_json_val *val, void *out)
+{
+	return spdk_json_decode_object(val, rpc_nvmf_kv_exec_allow_decoders,
+				       SPDK_COUNTOF(rpc_nvmf_kv_exec_allow_decoders), out);
+}
+
+static void
+free_rpc_nvmf_kv_exec_allow(struct rpc_nvmf_kv_exec_allow *req)
+{
+	free(req->binding);
+	free(req->runtime);
+	free(req->module_namespace);
+	free(req->module_key);
+	free(req->sha256);
+}
+
+#define RPC_NVMF_KV_EXEC_ALLOWLIST_MAX 256
+
+struct rpc_nvmf_kv_exec_allowlist {
+	size_t				count;
+	struct rpc_nvmf_kv_exec_allow	items[RPC_NVMF_KV_EXEC_ALLOWLIST_MAX];
+};
+
+static int
+rpc_decode_nvmf_kv_exec_allowlist(const struct spdk_json_val *val, void *out)
+{
+	struct rpc_nvmf_kv_exec_allowlist *arr = out;
+
+	return spdk_json_decode_array(val, rpc_decode_nvmf_kv_exec_allow, arr->items,
+				      RPC_NVMF_KV_EXEC_ALLOWLIST_MAX, &arr->count,
+				      sizeof(arr->items[0]));
+}
+
+static void
+free_rpc_nvmf_kv_exec_allowlist(struct rpc_nvmf_kv_exec_allowlist *arr)
+{
+	size_t i;
+
+	for (i = 0; i < arr->count; i++) {
+		free_rpc_nvmf_kv_exec_allow(&arr->items[i]);
+	}
+}
+
+struct rpc_bdev_kvrados_create_ctx {
+	char				*name;
+	struct spdk_uuid		uuid;
+	uint32_t			max_key_size;
+	uint32_t			max_value_size;
+	uint32_t			optimal_value_granularity;
+	uint64_t			num_keys;
+	char				*executor_endpoint;
+	bool				read_only;
+	struct rpc_nvmf_kv_exec_allowlist exec_allowlist;
+	int32_t				numa_id;
+};
+
+static void
+free_rpc_bdev_kvrados_create(struct rpc_bdev_kvrados_create_ctx *req)
+{
+	free(req->name);
+	free(req->executor_endpoint);
+	free_rpc_nvmf_kv_exec_allowlist(&req->exec_allowlist);
+}
+
+static const struct spdk_json_object_decoder rpc_bdev_kvrados_create_decoders[] = {
+	{"name", offsetof(struct rpc_bdev_kvrados_create_ctx, name), spdk_json_decode_string, true},
+	{"uuid", offsetof(struct rpc_bdev_kvrados_create_ctx, uuid), spdk_json_decode_uuid, true},
+	{"max_key_size", offsetof(struct rpc_bdev_kvrados_create_ctx, max_key_size), spdk_json_decode_uint32, true},
+	{"max_value_size", offsetof(struct rpc_bdev_kvrados_create_ctx, max_value_size), spdk_json_decode_uint32, true},
+	{"optimal_value_granularity", offsetof(struct rpc_bdev_kvrados_create_ctx, optimal_value_granularity), spdk_json_decode_uint32, true},
+	{"num_keys", offsetof(struct rpc_bdev_kvrados_create_ctx, num_keys), spdk_json_decode_uint64, true},
+	{"executor_endpoint", offsetof(struct rpc_bdev_kvrados_create_ctx, executor_endpoint), spdk_json_decode_string, true},
+	{"read_only", offsetof(struct rpc_bdev_kvrados_create_ctx, read_only), spdk_json_decode_bool, true},
+	{"exec_allowlist", offsetof(struct rpc_bdev_kvrados_create_ctx, exec_allowlist), rpc_decode_nvmf_kv_exec_allowlist, true},
+	{"numa_id", offsetof(struct rpc_bdev_kvrados_create_ctx, numa_id), spdk_json_decode_int32, true},
+};
 
 static void
 rpc_bdev_kvrados_create(struct spdk_jsonrpc_request *request,
@@ -36,8 +138,8 @@ rpc_bdev_kvrados_create(struct spdk_jsonrpc_request *request,
 
 	req.numa_id = SPDK_ENV_NUMA_ID_ANY;
 
-	if (params && spdk_json_decode_object(params, rpc_bdev_kvrados_create_decoders_autogen,
-					      SPDK_COUNTOF(rpc_bdev_kvrados_create_decoders_autogen),
+	if (params && spdk_json_decode_object(params, rpc_bdev_kvrados_create_decoders,
+					      SPDK_COUNTOF(rpc_bdev_kvrados_create_decoders),
 					      &req)) {
 		SPDK_DEBUGLOG(bdev_kvrados, "spdk_json_decode_object failed\n");
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
@@ -96,9 +198,7 @@ cleanup:
 SPDK_RPC_REGISTER("bdev_kvrados_create", rpc_bdev_kvrados_create, SPDK_RPC_RUNTIME)
 
 /*
- * Delete keeps a hand-rolled decoder (single 'name' param). The struct/free are
- * named *_req (not the autogen *_ctx / free_rpc_bdev_kvrados_delete in
- * rpc_autogen.h, which this TU includes) to avoid a redefinition collision.
+ * Delete: single 'name' param (required), hand-rolled inline decoder.
  */
 struct rpc_bdev_kvrados_delete_req {
 	char *name;
@@ -111,7 +211,7 @@ free_rpc_bdev_kvrados_delete_req(struct rpc_bdev_kvrados_delete_req *req)
 }
 
 static const struct spdk_json_object_decoder rpc_bdev_kvrados_delete_decoders[] = {
-	{"name", offsetof(struct rpc_bdev_kvrados_delete_req, name), spdk_json_decode_string},
+	{"name", offsetof(struct rpc_bdev_kvrados_delete_req, name), spdk_json_decode_string, false},
 };
 
 static void
