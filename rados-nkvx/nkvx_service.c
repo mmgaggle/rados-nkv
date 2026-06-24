@@ -47,6 +47,9 @@
 /* Set from a signal handler to break the progress loop for an orderly exit. */
 static volatile sig_atomic_t g_stop;
 
+/* TEST-ONLY: max --mem-object seeds (slice spdk-7sr.4 / S3 loopback verify). */
+#define NKVX_SERVICE_MAX_MEM_OBJS 16
+
 /*
  * The librados-backed executor backend (Slice C5a). NULL until a --rados-pool is
  * configured; when NULL the handler keeps the C2 skeleton behaviour (decode +
@@ -746,6 +749,171 @@ nkvx_cancel_handler(hg_handle_t handle)
 }
 
 /*
+ * ====================================================================
+ * Base-layer KV verb handler (slice spdk-7sr.4 / S3): the `nkvx_kv` RPC.
+ *
+ * Additive to the frozen nkvx_exec contract (registered under a distinct name, like
+ * nkvx_cancel), so it does not perturb the Exec wire id or envelope. S3 implements
+ * the RETRIEVE verb end-to-end; Store/Delete/Exist/List land in S4.
+ *
+ * Delivery mirrors the Exec inline-vs-PUSH rule (design §1.3): a small value rides
+ * inline in nkvx_kv_out_t; a large value (> NKVX_INLINE_MAX) the front offered a
+ * result_sink for is PUSHed straight into the front's host DPTR, and the response is
+ * sent only AFTER the PUSH completes (NORMATIVE — responding early would let the
+ * tenant read a partially-written DPTR). The Slice C6b cross-process cancel handshake
+ * is NOT wired for base verbs in S3 (Retrieve is short and non-mutating); per-verb
+ * cancel is a later concern.
+ * ====================================================================
+ */
+struct nkvx_kv_req {
+	hg_handle_t		handle;
+	hg_context_t		*ctx;
+	hg_addr_t		origin;
+	nkvx_kv_in_t		in;
+	struct nkvx_exec_result	res;		/* delivered bytes from the backend */
+	nkvx_kv_out_t		out;		/* response envelope (borrows res.buf) */
+	hg_bulk_t		local_result;	/* local READ handle for the PUSH */
+};
+
+/* Respond with req->out (already populated) and tear the KV request down. */
+static void
+nkvx_kv_req_finish(struct nkvx_kv_req *req)
+{
+	hg_return_t ret;
+
+	ret = HG_Respond(req->handle, NULL, NULL, &req->out);
+	if (ret != HG_SUCCESS) {
+		fprintf(stderr, "nkvx_service: kv HG_Respond failed: %s\n",
+			HG_Error_to_string(ret));
+	}
+	if (req->local_result != HG_BULK_NULL) {
+		HG_Bulk_free(req->local_result);
+	}
+	nkvx_exec_result_free(&req->res);
+	HG_Free_input(req->handle, &req->in);
+	HG_Destroy(req->handle);
+	free(req);
+}
+
+static void
+nkvx_kv_req_fail(struct nkvx_kv_req *req, enum spdk_kvdev_io_status status)
+{
+	req->out.status = nkvx_status_to_wire(status);
+	req->out.result_len = 0;
+	req->out.result_inline = NULL;
+	req->out.result_inline_len = 0;
+	nkvx_kv_req_finish(req);
+}
+
+/* PUSH-completion callback: the value has fully landed in the front's result_sink;
+ * only NOW respond (NORMATIVE PUSH-before-Respond, design §1.3). */
+static hg_return_t
+nkvx_kv_result_pushed_cb(const struct hg_cb_info *info)
+{
+	struct nkvx_kv_req *req = info->arg;
+
+	if (info->ret != HG_SUCCESS) {
+		fprintf(stderr, "nkvx_service: kv result PUSH failed: %s\n",
+			HG_Error_to_string(info->ret));
+		nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_FAILED);
+		return HG_SUCCESS;
+	}
+	req->out.status = nkvx_status_to_wire(req->res.status);
+	req->out.result_len = req->res.result_len;	/* TRUE length -> CQE DW0 */
+	req->out.result_inline = NULL;			/* delivered via the sink */
+	req->out.result_inline_len = 0;
+	nkvx_kv_req_finish(req);
+	return HG_SUCCESS;
+}
+
+static hg_return_t
+nkvx_kv_handler(hg_handle_t handle)
+{
+	struct nkvx_kv_req *req;
+	const struct hg_info *info;
+	hg_return_t ret;
+
+	req = calloc(1, sizeof(*req));
+	if (req == NULL) {
+		fprintf(stderr, "nkvx_service: out of memory for kv request\n");
+		HG_Destroy(handle);
+		return HG_NOMEM;
+	}
+	req->handle = handle;
+	req->local_result = HG_BULK_NULL;
+
+	ret = HG_Get_input(handle, &req->in);
+	if (ret != HG_SUCCESS) {
+		fprintf(stderr, "nkvx_service: kv HG_Get_input failed: %s\n",
+			HG_Error_to_string(ret));
+		free(req);
+		HG_Destroy(handle);
+		return ret;
+	}
+
+	info = HG_Get_info(handle);
+	req->ctx = info->context;
+	req->origin = info->addr;
+
+	if (g_executor == NULL) {
+		/* C2 skeleton mode (no cluster): decode + decline so the transport/contract
+		 * still round-trips with no RADOS. */
+		fprintf(stderr, "nkvx_service: nkvx_kv verb=%u key_len=%u -> NOT_SUPPORTED "
+			"(no cluster)\n", req->in.verb, req->in.key_len);
+		nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_NOT_SUPPORTED);
+		return HG_SUCCESS;
+	}
+
+	nkvx_executor_kv(g_executor, &req->in, &req->res);
+	fprintf(stderr,
+		"nkvx_service: nkvx_kv verb=%u key_len=%u osize=%u -> status=%d "
+		"result_len=%u deliver=%u%s\n",
+		req->in.verb, req->in.key_len, req->in.osize, req->res.status,
+		req->res.result_len, req->res.buf_len,
+		(req->in.result_sink != HG_BULK_NULL) ? " sink" : "");
+
+	/* Large value + a sink to push into: front-sink/executor-push (design §1.3). */
+	if (req->in.result_sink != HG_BULK_NULL && req->res.buf_len > NKVX_INLINE_MAX) {
+		hg_class_t *cls = HG_Get_info(req->handle)->hg_class;
+		void *p = req->res.buf;
+		hg_size_t sz = req->res.buf_len;
+
+		ret = HG_Bulk_create(cls, 1, &p, &sz, HG_BULK_READ_ONLY, &req->local_result);
+		if (ret != HG_SUCCESS) {
+			fprintf(stderr, "nkvx_service: kv HG_Bulk_create(result) failed: %s\n",
+				HG_Error_to_string(ret));
+			nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_FAILED);
+			return HG_SUCCESS;
+		}
+		ret = HG_Bulk_transfer(req->ctx, nkvx_kv_result_pushed_cb, req,
+				       HG_BULK_PUSH, req->origin, req->in.result_sink, 0,
+				       req->local_result, 0, sz, HG_OP_ID_IGNORE);
+		if (ret != HG_SUCCESS) {
+			fprintf(stderr, "nkvx_service: kv HG_Bulk_transfer(PUSH) failed: %s\n",
+				HG_Error_to_string(ret));
+			nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_FAILED);
+			return HG_SUCCESS;
+		}
+		return HG_SUCCESS;	/* respond from nkvx_kv_result_pushed_cb (NORMATIVE) */
+	}
+
+	/* Inline path. A large value with no sink offered cannot be delivered (mirrors
+	 * the Exec guard); decline cleanly. */
+	if (req->res.buf_len > NKVX_INLINE_MAX) {
+		fprintf(stderr, "nkvx_service: kv value %u > inline max %u and no result_sink "
+			"— NOT_SUPPORTED\n", req->res.buf_len, NKVX_INLINE_MAX);
+		nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_NOT_SUPPORTED);
+		return HG_SUCCESS;
+	}
+	req->out.status = nkvx_status_to_wire(req->res.status);
+	req->out.result_len = req->res.result_len;		/* TRUE length -> CQE DW0 */
+	req->out.result_inline = req->res.buf;			/* borrowed; freed via res */
+	req->out.result_inline_len = req->res.buf_len;
+	nkvx_kv_req_finish(req);
+	return HG_SUCCESS;
+}
+
+/*
  * Publish the target's self-address string so the front can HG_Addr_lookup it
  * (design OQ-8 bootstrap = a file on the testbed). Written atomically (temp +
  * rename) so a reader never observes a half-written address. Also echoed to
@@ -917,7 +1085,9 @@ usage(const char *prog)
 		"                     cold-fill + module run (absent -> C2 skeleton, NOT_SUPPORTED)\n"
 		"  --rados-namespace  RADOS namespace (== KV namespace; default namespace if omitted)\n"
 		"  --rados-conf       ceph.conf path (default librados search if omitted)\n"
-		"  --rados-user       ceph client id (default \"admin\")\n",
+		"  --rados-user       ceph client id (default \"admin\")\n"
+		"  --mem-object KEY=VALUE  TEST-ONLY in-memory object (slice spdk-7sr.4 / S3\n"
+		"                     RETRIEVE loopback verify); repeatable; exclusive with --rados-pool\n",
 		prog);
 }
 
@@ -930,10 +1100,16 @@ main(int argc, char **argv)
 	const char *rados_ns = NULL;
 	const char *rados_conf = NULL;
 	const char *rados_user = NULL;
+	/* TEST-ONLY in-memory objects (slice spdk-7sr.4 / S3 loopback verify): each
+	 * --mem-object KEY=VALUE seeds one object at oid=hex(KEY). Mutually exclusive
+	 * with --rados-pool. */
+	const char *mem_objs[NKVX_SERVICE_MAX_MEM_OBJS];
+	int mem_obj_count = 0;
 	int rc = 0;
 
 	enum {
 		OPT_RADOS_POOL = 256, OPT_RADOS_NS, OPT_RADOS_CONF, OPT_RADOS_USER,
+		OPT_MEM_OBJECT,
 	};
 	static const struct option opts[] = {
 		{ "listen",          required_argument, NULL, 'l' },
@@ -942,6 +1118,7 @@ main(int argc, char **argv)
 		{ "rados-namespace", required_argument, NULL, OPT_RADOS_NS },
 		{ "rados-conf",      required_argument, NULL, OPT_RADOS_CONF },
 		{ "rados-user",      required_argument, NULL, OPT_RADOS_USER },
+		{ "mem-object",      required_argument, NULL, OPT_MEM_OBJECT },
 		{ "help",            no_argument,       NULL, 'h' },
 		{ NULL,              0,                 NULL, 0 },
 	};
@@ -965,6 +1142,13 @@ main(int argc, char **argv)
 			break;
 		case OPT_RADOS_USER:
 			rados_user = optarg;
+			break;
+		case OPT_MEM_OBJECT:
+			if (mem_obj_count >= NKVX_SERVICE_MAX_MEM_OBJS) {
+				fprintf(stderr, "nkvx_service: too many --mem-object\n");
+				return 2;
+			}
+			mem_objs[mem_obj_count++] = optarg;
 			break;
 		case 'h':
 			usage(argv[0]);
@@ -1039,6 +1223,75 @@ main(int argc, char **argv)
 		fprintf(stderr, "nkvx_service: HG_Register_name(nkvx_cancel) failed\n");
 		rc = 1;
 		goto out;
+	}
+
+	/* Slice spdk-7sr.4 (S3): the base-layer KV verb RPC (Retrieve in S3; the other
+	 * verbs in S4). Additive (distinct name), so it does not perturb the frozen
+	 * nkvx_exec contract. */
+	hg_id_t kv_id = HG_Register_name(hg, "nkvx_kv",
+					 hg_proc_nkvx_kv_in_t,
+					 hg_proc_nkvx_kv_out_t,
+					 nkvx_kv_handler);
+	if (kv_id == 0) {
+		fprintf(stderr, "nkvx_service: HG_Register_name(nkvx_kv) failed\n");
+		rc = 1;
+		goto out;
+	}
+
+	/* TEST-ONLY in-memory backend (slice spdk-7sr.4 / S3): seed objects from
+	 * --mem-object KEY=VALUE so the RETRIEVE datapath round-trips over na+sm with no
+	 * librados. Mutually exclusive with --rados-pool. */
+	if (mem_obj_count > 0) {
+		int erc;
+
+		if (rados_pool != NULL) {
+			fprintf(stderr, "nkvx_service: --mem-object and --rados-pool are exclusive\n");
+			rc = 1;
+			goto out;
+		}
+		erc = nkvx_executor_open_mem(&g_executor);
+		if (erc != 0) {
+			fprintf(stderr, "nkvx_service: nkvx_executor_open_mem failed: %s\n",
+				strerror(-erc));
+			rc = 1;
+			goto out;
+		}
+		for (int i = 0; i < mem_obj_count; i++) {
+			const char *eq = strchr(mem_objs[i], '=');
+			const char *key, *val;
+			size_t klen;
+			char oid[SPDK_KVDEV_EXEC_KEY_MAX_LEN * 2 + 1];
+			static const char hex[] = "0123456789abcdef";
+
+			if (eq == NULL) {
+				fprintf(stderr, "nkvx_service: --mem-object must be KEY=VALUE\n");
+				rc = 1;
+				goto out;
+			}
+			key = mem_objs[i];
+			klen = (size_t)(eq - key);
+			val = eq + 1;
+			if (klen == 0 || klen > SPDK_KVDEV_EXEC_KEY_MAX_LEN) {
+				fprintf(stderr, "nkvx_service: --mem-object key must be 1..%d bytes\n",
+					SPDK_KVDEV_EXEC_KEY_MAX_LEN);
+				rc = 1;
+				goto out;
+			}
+			for (size_t j = 0; j < klen; j++) {
+				oid[j * 2]     = hex[(unsigned char)key[j] >> 4];
+				oid[j * 2 + 1] = hex[(unsigned char)key[j] & 0xf];
+			}
+			oid[klen * 2] = '\0';
+			erc = nkvx_executor_mem_put(g_executor, oid, val, strlen(val));
+			if (erc != 0) {
+				fprintf(stderr, "nkvx_service: mem_put(%s) failed: %s\n",
+					oid, strerror(-erc));
+				rc = 1;
+				goto out;
+			}
+			printf("nkvx_service: mem object key='%.*s' (oid=%s) len=%zu\n",
+			       (int)klen, key, oid, strlen(val));
+		}
 	}
 
 	/* Slice C5a: connect librados up front (before publishing the address, so the
