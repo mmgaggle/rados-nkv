@@ -3,7 +3,6 @@
  */
 
 #include "spdk/stdinc.h"
-#include "spdk/config.h"	/* SPDK_CONFIG_WASM (must precede the #if below) */
 #include "spdk/log.h"
 #include "spdk/kvdev.h"
 #include "spdk/util.h"
@@ -13,8 +12,8 @@
 
 /*
  * TB4 acceptance counters (spdk-ii0). Defined UNCONDITIONALLY (outside the
- * SPDK_CONFIG_WASM guard) so the unit test can read them in both --with-wasm and
- * --without-wasm builds. The cache code (under the guard) bumps them. Guarded by
+ * NKVX_WITH_WASM guard) so the unit test can read them in both real-wasm and
+ * stub builds. The cache code (under the guard) bumps them. Guarded by
  * the cache mutex when wasm is built; harmless zero in the stub build.
  */
 static struct kvdev_rados_nkvx_wasm_stats g_nkvx_wasm_stats;
@@ -30,12 +29,13 @@ kvdev_rados_nkvx_wasm_get_stats(struct kvdev_rados_nkvx_wasm_stats *out)
 /*
  * dlopen-backed wasmtime runtime for the rados-nkvx Exec path. See the header
  * for the design contract (ADR-0013). This file is only meaningfully compiled
- * when SPDK_CONFIG_WASM is set; with --without-wasm it collapses to a stub that
- * always reports the wasm runtime unavailable (NOT_SUPPORTED), so a build never
- * requires anything wasm.
+ * when NKVX_WITH_WASM is set (our out-of-tree build knob, passed via
+ * -DNKVX_WITH_WASM by the executor's rados-nkvx/Makefile and the kvdev UT mk);
+ * without it the file collapses to a stub that always reports the wasm runtime
+ * unavailable (NOT_SUPPORTED), so a build never requires anything wasm.
  */
 
-#if defined(SPDK_CONFIG_WASM)
+#if defined(NKVX_WITH_WASM)
 
 #include <dlfcn.h>
 
@@ -2749,7 +2749,7 @@ out:
 	return status;
 }
 
-#else /* !SPDK_CONFIG_WASM */
+#else /* !NKVX_WITH_WASM */
 
 int
 kvdev_rados_nkvx_wasm_run(const char *name,
@@ -2936,4 +2936,4 @@ kvdev_rados_nkvx_wasm_warm_cache_count(void)
 	return 0;
 }
 
-#endif /* SPDK_CONFIG_WASM */
+#endif /* NKVX_WITH_WASM */
