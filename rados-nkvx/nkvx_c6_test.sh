@@ -151,7 +151,7 @@ echo "    NOTE: origin-side teardown drain only; cross-process 'no late PUSH aft
 echo "          teardown' is NOT asserted here (invisible to valgrind on sm/tcp) —"
 echo "          DEFERRED to bead spdk-5ia (executor-side abort; verifiable on verbs)."
 "$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-	--key "$BIGKEY" --runtime 2 --module-ns nkvx --module identity \
+	--key "$BIGKEY" --runtime 1 --module-ns nkvx --module identity \
 	--osize "$BIGSZ" --cancel-after 0 --iters 4 --expect 0 2>&1 \
 	| sed 's/^/  /' || fail=1
 if ! kill -0 "$SVC_PID" 2>/dev/null; then echo "  FAIL: executor died during cancel test"; fail=1; fi
@@ -184,7 +184,7 @@ KILL_OUT="$WORK/kill.out"
 ( sleep 0.3; kill -9 "$SVC_PID" 2>/dev/null ) &
 KILLER=$!
 timeout 25 "$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-	--key "$BIGKEY" --runtime 2 --module-ns nkvx --module identity \
+	--key "$BIGKEY" --runtime 1 --module-ns nkvx --module identity \
 	--osize "$BIGSZ" --cancel-after 4 --iters 1 --expect 0 >"$KILL_OUT" 2>&1
 krc=$?
 wait "$KILLER" 2>/dev/null; wait "$SVC_PID" 2>/dev/null; SVC_PID=""
@@ -212,7 +212,7 @@ if command -v valgrind >/dev/null 2>&1; then
 	"$RADOS" -c "$CEPH_CONF" -p "$KVPOOL" put "$VGOID" "$WORK/vg.bin" >/dev/null 2>&1
 	valgrind --leak-check=full --error-exitcode=42 --errors-for-leak-kinds=definite,indirect \
 		"$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-		--key "$VGKEY" --runtime 2 --module-ns nkvx --module identity \
+		--key "$VGKEY" --runtime 1 --module-ns nkvx --module identity \
 		--osize $((1024*1024)) --cancel-after 1 --iters 3 --expect 0 \
 		>"$VG_LOG" 2>&1
 	vgrc=$?
