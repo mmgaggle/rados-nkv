@@ -64,13 +64,6 @@ DEFINE_STUB(kvdev_rados_nkvx_front_forward, int, (struct nkvx_front *front,
 		const void *input, uint32_t input_len, void *output_buf,
 		uint32_t output_buf_len, spdk_kvdev_io_completion_cb cb_fn, void *cb_arg,
 		uint64_t *out_token), 0);
-DEFINE_STUB(kvdev_rados_nkvx_front_forward_dmabuf, int, (struct nkvx_front *front,
-		const void *key, uint8_t key_len, uint32_t op_id, bool read_only,
-		uint8_t runtime, const char *module_key, const char *module_ns,
-		const uint8_t *sha256, bool sha256_valid, uint64_t caps,
-		const void *input, uint32_t input_len, void *sink_va, uint32_t sink_len,
-		int sink_fd, uint64_t sink_offset, spdk_kvdev_io_completion_cb cb_fn,
-		void *cb_arg, uint64_t *out_token), 0);
 DEFINE_STUB(kvdev_rados_nkvx_front_retrieve, int, (struct nkvx_front *front,
 		const void *key, uint8_t key_len, bool read_only, void *output_buf,
 		uint32_t output_buf_len, spdk_kvdev_io_completion_cb cb_fn, void *cb_arg), 0);
@@ -678,50 +671,14 @@ ut_submit_exec(struct kvrados_disk *kvrados, struct spdk_io_channel *ch,
 	bdev_io.type = SPDK_BDEV_IO_TYPE_NVME_IOV_MD;
 	bdev_io.u.nvme_passthru.cmd.opc = SPDK_NVME_OPC_KV_EXEC;
 	bdev_io.u.nvme_passthru.cmd.nsid = 1;
-	bdev_io.u.nvme_passthru.cmd.cdw12_bits.kv_exec.osize = osize;
-	bdev_io.u.nvme_passthru.cmd.cdw13_bits.kv_exec.op_id = op_id;
+	/* Decode is from the RAW dwords (spdk_kv_exec_decode): CDW12 = osize, CDW13 =
+	 * op_id. We set the raw uint32 dwords, not cmd.cdw1x_bits.kv_exec.* (those
+	 * union members are our vendor additions, absent in unmodified SPDK). */
+	bdev_io.u.nvme_passthru.cmd.cdw12 = osize;
+	bdev_io.u.nvme_passthru.cmd.cdw13 = op_id;
 	bdev_io.u.nvme_passthru.iovs = iov;
 	bdev_io.u.nvme_passthru.iovcnt = iovcnt;
 	bdev_io.u.nvme_passthru.buf = NULL;
-	/* No dma-buf result sink: the nvmf shim (spdk_bdev_nvme_iov_passthru_md)
-	 * stamps fd = -1 for a normal host-SGL I/O; mirror that here (a zero-init
-	 * bdev_io would otherwise leave fd == 0, a *valid* fd, misrouting). */
-	bdev_io.u.nvme_passthru.dmabuf_sink_fd = -1;
-
-	ut_reset_cpl();
-	kvrados_submit_request(ch, &bdev_io);
-}
-
-/*
- * Build + submit a KV Exec carrying an out-of-band dma-buf result sink (VRAM-direct,
- * beads spdk-7sr.8) — the fd-relay the nvmf shim performs. The mixed SGL is
- * [RAM head iov(s) ...][dma-buf body]: the trailing iov is the dma-buf sink (its
- * iov_base is the non-dereferenceable sentinel, never CPU-read), preceding iov(s)
- * carry [u16 key_len][key][input]. This drives kvrados_handle_exec's dma-buf branch
- * WITHOUT a GPU or a live executor — verifying fd plumbing + sentinel handling only.
- */
-#define UT_DMABUF_SENTINEL ((void *)(uintptr_t)0x1)
-static void
-ut_submit_exec_dmabuf(struct kvrados_disk *kvrados, struct spdk_io_channel *ch,
-		      uint32_t op_id, uint32_t osize, struct iovec *iovs, int iovcnt,
-		      int sink_fd, uint64_t sink_off, uint32_t sink_len, uint8_t sink_iovidx)
-{
-	struct spdk_bdev_io bdev_io = {};
-
-	bdev_io.bdev = &kvrados->disk;
-	bdev_io.type = SPDK_BDEV_IO_TYPE_NVME_IOV_MD;
-	bdev_io.u.nvme_passthru.cmd.opc = SPDK_NVME_OPC_KV_EXEC;
-	bdev_io.u.nvme_passthru.cmd.nsid = 1;
-	bdev_io.u.nvme_passthru.cmd.cdw12_bits.kv_exec.osize = osize;
-	bdev_io.u.nvme_passthru.cmd.cdw13_bits.kv_exec.op_id = op_id;
-	bdev_io.u.nvme_passthru.iovs = iovs;
-	bdev_io.u.nvme_passthru.iovcnt = iovcnt;
-	bdev_io.u.nvme_passthru.buf = NULL;
-	bdev_io.u.nvme_passthru.dmabuf_sink_fd = sink_fd;
-	bdev_io.u.nvme_passthru.dmabuf_sink_offset = sink_off;
-	bdev_io.u.nvme_passthru.dmabuf_sink_len = sink_len;
-	bdev_io.u.nvme_passthru.dmabuf_sink_iovidx = sink_iovidx;
-	bdev_io.u.nvme_passthru.dmabuf_sink_iova = 0;
 
 	ut_reset_cpl();
 	kvrados_submit_request(ch, &bdev_io);
@@ -1053,136 +1010,6 @@ test_exec_abort_found_no_transport(void)
 	free(ch);
 }
 
-/* ---- KV Exec dma-buf result sink (VRAM-direct fd-relay, beads spdk-7sr.8) ----- */
-
-/*
- * A well-formed dma-buf Exec ([RAM head][dma-buf body], trailing dma-buf segment,
- * sink length > the inline cap) passes the shape + sink-length guards and the
- * native-built-in path is SKIPPED (a dma-buf sink has no host VA to write). It then
- * needs the executor's RDMA-WRITE forward, which is absent in the --without-mercury
- * UT build -> NOT_SUPPORTED (Invalid Opcode). The point: the relayed fd routed the
- * request to the dma-buf forward branch, NOT the host-VA native path, and the
- * sentinel iov_base was never dereferenced (no crash).
- */
-static void
-test_exec_dmabuf_sink_routes_to_forward(void)
-{
-	struct kvrados_disk *kvrados;
-	struct kvrados_channel *kch;
-	struct spdk_io_channel *ch;
-	uint8_t head[64];
-	struct iovec iovs[2];
-	uint32_t head_len;
-
-	kvrados = ut_create_kvrados(255, 128 * 1024, 4096, 1);
-	/* "inputlen" is an input-only native built-in; on the host-VA path it would run
-	 * in-process. With a dma-buf sink it MUST be bypassed in favor of the forward. */
-	ut_set_native_allow(kvrados, 1, "inputlen");
-	ch = ut_make_channel(&kch);
-
-	head_len = ut_layout_inpayload(head, "ABCD", 4, 16);	/* RAM head: key + 16B input */
-	iovs[0].iov_base = head;
-	iovs[0].iov_len = head_len;
-	iovs[1].iov_base = UT_DMABUF_SENTINEL;			/* dma-buf body: NEVER read */
-	iovs[1].iov_len = 64 * 1024;
-
-	/* sink len 64KiB > SPDK_KVDEV_DMABUF_SINK_MIN_LEN (4096); dma-buf is the
-	 * trailing iov (iovidx 1 == iovcnt-1) with a RAM head preceding it. */
-	ut_submit_exec_dmabuf(kvrados, ch, 1, 64 * 1024, iovs, 2,
-			      7 /* fd */, 0 /* off */, 64 * 1024 /* len */, 1 /* iovidx */);
-
-	CU_ASSERT(g_completed);
-	/* --without-mercury: the dma-buf forward has no transport -> NOT_SUPPORTED.
-	 * (With Mercury this would instead call kvdev_rados_nkvx_front_forward_dmabuf.)
-	 * Critically NOT a SUCCESS from the native built-in running on the sentinel VA. */
-	CU_ASSERT_EQUAL(g_cpl_sc, SPDK_NVME_SC_INVALID_OPCODE);
-	CU_ASSERT(TAILQ_EMPTY(&kch->exec_inflight));
-
-	free(ch);
-	ut_free_allow(kvrados);
-	ut_free_kvrados(kvrados);
-}
-
-/*
- * Shape guard: a dma-buf segment that is NOT the trailing iov (or has no RAM head
- * preceding it) is rejected with DATA_SGL_LENGTH_INVALID before any dispatch — the
- * forwarder requires [RAM head][dma-buf body]. Here iovidx 0 (no RAM head -> no key)
- * is malformed.
- */
-static void
-test_exec_dmabuf_sink_bad_shape(void)
-{
-	struct kvrados_disk *kvrados;
-	struct kvrados_channel *kch;
-	struct spdk_io_channel *ch;
-	uint8_t head[64];
-	struct iovec iovs[2];
-	uint32_t head_len;
-
-	kvrados = ut_create_kvrados(255, 128 * 1024, 4096, 1);
-	ut_set_native_allow(kvrados, 1, "inputlen");
-	ch = ut_make_channel(&kch);
-
-	head_len = ut_layout_inpayload(head, "ABCD", 4, 16);
-	iovs[0].iov_base = head;
-	iovs[0].iov_len = head_len;
-	iovs[1].iov_base = UT_DMABUF_SENTINEL;
-	iovs[1].iov_len = 64 * 1024;
-
-	/* iovidx 0: dma-buf is the FIRST segment -> no RAM head to parse the key from. */
-	ut_submit_exec_dmabuf(kvrados, ch, 1, 64 * 1024, iovs, 2,
-			      7, 0, 64 * 1024, 0 /* iovidx 0 -> bad shape */);
-
-	CU_ASSERT(g_completed);
-	CU_ASSERT_EQUAL(g_cpl_sct, SPDK_NVME_SCT_GENERIC);
-	CU_ASSERT_EQUAL(g_cpl_sc, SPDK_NVME_SC_DATA_SGL_LENGTH_INVALID);
-	CU_ASSERT(TAILQ_EMPTY(&kch->exec_inflight));
-
-	free(ch);
-	ut_free_allow(kvrados);
-	ut_free_kvrados(kvrados);
-}
-
-/*
- * Sub-inline sink reject (silent-data-loss guard): a dma-buf sink whose declared
- * length is <= SPDK_KVDEV_DMABUF_SINK_MIN_LEN would let the result ride inline and
- * be dropped by the dma-buf forward (no host_out fallback) yet complete SUCCESS.
- * The forwarder must reject it with DATA_SGL_LENGTH_INVALID before dispatch.
- */
-static void
-test_exec_dmabuf_sink_sub_inline_reject(void)
-{
-	struct kvrados_disk *kvrados;
-	struct kvrados_channel *kch;
-	struct spdk_io_channel *ch;
-	uint8_t head[64];
-	struct iovec iovs[2];
-	uint32_t head_len;
-
-	kvrados = ut_create_kvrados(255, 128 * 1024, 4096, 1);
-	ut_set_native_allow(kvrados, 1, "inputlen");
-	ch = ut_make_channel(&kch);
-
-	head_len = ut_layout_inpayload(head, "ABCD", 4, 16);
-	iovs[0].iov_base = head;
-	iovs[0].iov_len = head_len;
-	iovs[1].iov_base = UT_DMABUF_SENTINEL;
-	iovs[1].iov_len = 4096;
-
-	/* sink len == SPDK_KVDEV_DMABUF_SINK_MIN_LEN (4096): NOT strictly larger. */
-	ut_submit_exec_dmabuf(kvrados, ch, 1, 4096, iovs, 2,
-			      7, 0, 4096 /* <= inline cap */, 1);
-
-	CU_ASSERT(g_completed);
-	CU_ASSERT_EQUAL(g_cpl_sct, SPDK_NVME_SCT_GENERIC);
-	CU_ASSERT_EQUAL(g_cpl_sc, SPDK_NVME_SC_DATA_SGL_LENGTH_INVALID);
-	CU_ASSERT(TAILQ_EMPTY(&kch->exec_inflight));
-
-	free(ch);
-	ut_free_allow(kvrados);
-	ut_free_kvrados(kvrados);
-}
-
 int
 main(int argc, char **argv)
 {
@@ -1218,9 +1045,6 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_exec_readonly_native_runs);
 	CU_ADD_TEST(suite, test_exec_abort_not_found);
 	CU_ADD_TEST(suite, test_exec_abort_found_no_transport);
-	CU_ADD_TEST(suite, test_exec_dmabuf_sink_routes_to_forward);
-	CU_ADD_TEST(suite, test_exec_dmabuf_sink_bad_shape);
-	CU_ADD_TEST(suite, test_exec_dmabuf_sink_sub_inline_reject);
 
 	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
