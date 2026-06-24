@@ -1,14 +1,26 @@
 #!/usr/bin/env bash
-# Stage a PRISTINE build context and build+push the rados-nkv image.
+# Stage the OUT-OF-TREE build context and build the rados-nkv datapath image
+# (Slice I, spdk-7sr.17.10).
 #
-# Why this exists: packaging/container/Dockerfile (COPY . /src) assumes a freshly
-# `git submodule update --init --recursive` spdk tree with NO build artifacts.
-# A developer's in-place-built spdk leaks host build state into the context —
-# cmake/meson caches bake absolute /home paths and abort under /src, and partial
-# artifact pruning leaves autotools trees (isa-l) half-built. This script copies
-# the working tree for everything EXCEPT spdk, and stages spdk as a clean `git
-# clone` (with a working .git, which SPDK's own rpm.sh/spec require) whose
-# submodules are sourced from the host's local objects. Non-destructive.
+# Unlike the former in-tree build (which compiled the whole SPDK fork in-image),
+# this stages a PRE-BUILT, UNMODIFIED SPDK base (commit X) plus its DPDK and the
+# vendored Mercury, and the image builds only the out-of-tree forwarder
+# (target/nkv_tgt) + executor (rados-nkvx). The base SPDK is a LOCAL commit not
+# on any remote, so it MUST come from the host's prebuilt tree.
+#
+# The prebuilt SPDK's shared objects bake absolute host RUNPATHs, and its
+# libspdk.so is a GROUP linker script of bare sonames, so the context stages
+# those trees and the Dockerfile restores them at the SAME absolute paths.
+#
+# Env knobs (all optional):
+#   REGISTRY      default quay.io/mmgaggle
+#   ENGINE        default podman
+#   CEPH_RELEASE  default devel       (tag prefix + floating :devel)
+#   PUSH          default 0
+#   CTX           default /tmp/nkv-ctx
+#   SPDK_BASE_DIR prebuilt SPDK X tree  (default below)
+#   DPDK_DIR      DPDK build the base links (default below)
+#   MERCURY_DIR   vendored Mercury install  (default below)
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -18,74 +30,82 @@ CEPH_RELEASE="${CEPH_RELEASE:-devel}"
 ENGINE="${ENGINE:-podman}"
 push="${PUSH:-0}"
 
+# These three MUST match the ARG defaults in packaging/container/Dockerfile, and
+# the image restores each at exactly this absolute path so the prebuilt SPDK's
+# RUNPATHs resolve unchanged.
+SPDK_BASE_DIR="${SPDK_BASE_DIR:-/home/kyle/src/rados-nkv-wt/slice-a/spdk}"
+DPDK_DIR="${DPDK_DIR:-/home/kyle/src/rados-nkv/spdk/dpdk/build}"
+MERCURY_DIR="${MERCURY_DIR:-/home/kyle/src/rados-nkv/spdk/vendor/mercury-install}"
+
 version=$(cat "$repo/VERSION")
 tag="${CEPH_RELEASE}_v${version}"
 image="${REGISTRY}/rados-nkv:${tag}"
 
-echo "== staging pristine context at $ctx =="
+# Sanity: the prebuilt base must actually be built (libspdk.so + nkv_tgt deps).
+[ -e "$SPDK_BASE_DIR/build/lib/libspdk.so" ] || {
+  echo "FAIL: prebuilt SPDK base not found at $SPDK_BASE_DIR/build/lib/libspdk.so" >&2
+  echo "      build it --with-shared first, or set SPDK_BASE_DIR=<prebuilt spdk>." >&2
+  exit 1; }
+ls "$DPDK_DIR"/lib/librte_*.so* >/dev/null 2>&1 || {
+  echo "FAIL: DPDK shared libs not found under $DPDK_DIR/lib (set DPDK_DIR)" >&2; exit 1; }
+[ -e "$MERCURY_DIR/lib/pkgconfig/mercury.pc" ] || {
+  echo "FAIL: vendored Mercury not found at $MERCURY_DIR (set MERCURY_DIR)" >&2; exit 1; }
+
+echo "== staging out-of-tree context at $ctx =="
 rm -rf "$ctx"
-mkdir -p "$ctx"
+mkdir -p "$ctx/src"
 
-# Working-tree copy of everything except spdk (exported clean below) and the
-# heavy / generated dirs the image never uses.
+# 1) The out-of-tree repo sources the image builds (target/, rados-nkvx/,
+#    scripts/, packaging/, VERSION). The clients/ + spdk submodule + heavy dirs
+#    are NOT needed by the datapath image.
+# NOTE: excludes are ROOT-ANCHORED (leading /) so e.g. /spdk only drops the
+# top-level submodule and NOT target/include/spdk (which holds our kvdev.h ABI).
 rsync -a \
-  --exclude='.git' \
-  --exclude='spdk' \
-  --exclude='vm-images' \
-  --exclude='build' \
-  --exclude='clients/vllm-weights' \
-  --exclude='clients/rkv' \
-  --exclude='clients/nixl' \
-  --exclude='clients/rocm-xio' \
-  "$repo"/ "$ctx"/
+  --exclude='/.git' \
+  --exclude='/spdk' \
+  --exclude='/ceph' \
+  --exclude='/clients' \
+  --exclude='/build' \
+  --exclude='/vm-images' \
+  --exclude='/target/nkv_tgt' --exclude='/target/*.o' \
+  --exclude='/rados-nkvx/nkvx_service' --exclude='/rados-nkvx/nkvx_exec_client' \
+  --exclude='/rados-nkvx/*.o' \
+  "$repo"/ "$ctx/src"/
 
-# Pristine spdk WITH a working .git: SPDK's own rpm.sh/spec run
-# `git submodule update --init`, which is fatal without one. We keep a persistent
-# clean clone and source its submodules from the host's already-fetched objects —
-# fully offline, and preserving the mmgaggle/libvfio-user fork commit (its
-# .gitmodules URL is SSH, which an unattended network init could not reach).
-SPDK_CLEAN="${SPDK_CLEAN:-/tmp/nkv-spdk-clean}"
-spdk_head=$(git -C "$repo/spdk" rev-parse HEAD)
-if [ "$(git -C "$SPDK_CLEAN" rev-parse HEAD 2>/dev/null)" != "$spdk_head" ]; then
-  echo "== preparing pristine spdk clone at $SPDK_CLEAN (HEAD $spdk_head) =="
-  rm -rf "$SPDK_CLEAN"
-  git clone --no-hardlinks "$repo/spdk" "$SPDK_CLEAN"
-  git -C "$SPDK_CLEAN" checkout --detach "$spdk_head"
-  git -C "$SPDK_CLEAN" submodule init
-  # Redirect each submodule URL to the host's local submodule repo (offline).
-  git -C "$SPDK_CLEAN" config -f "$SPDK_CLEAN/.gitmodules" --get-regexp '\.path$' \
-    | while read -r key path; do
-        name=${key#submodule.}; name=${name%.path}
-        git -C "$SPDK_CLEAN" config "submodule.${name}.url" "$repo/spdk/$path"
-      done
-  git -C "$SPDK_CLEAN" -c protocol.file.allow=always submodule update
-fi
-echo "== syncing pristine spdk into context =="
-rsync -a "$SPDK_CLEAN"/ "$ctx/spdk"/
+# 2) The prebuilt SPDK base, DPDK, and Mercury (copied so the context is
+#    self-contained; rsync dereferences nothing harmful here).
+echo "== staging prebuilt SPDK base ($SPDK_BASE_DIR) =="
+mkdir -p "$ctx/spdk-base" "$ctx/dpdk" "$ctx/mercury"
+rsync -a "$SPDK_BASE_DIR"/ "$ctx/spdk-base"/
+rsync -a "$DPDK_DIR"/      "$ctx/dpdk"/
+rsync -a "$MERCURY_DIR"/   "$ctx/mercury"/
+
+# A context-root .containerignore so the staged trees are NOT filtered by the
+# repo's .dockerignore (which targets the old in-tree layout). Keep only obvious
+# junk out; everything staged above is intentional.
+cat > "$ctx/.containerignore" <<'EOF'
+**/.git
+**/__pycache__
+src/clients
+src/spdk
+src/ceph
+EOF
 
 echo "== context size: $(du -sh "$ctx" | cut -f1) =="
 
 echo "== building $image (engine=$ENGINE) =="
-"$ENGINE" build -f "$ctx/packaging/container/Dockerfile" -t "$image" "$ctx"
+"$ENGINE" build \
+  -f "$ctx/src/packaging/container/Dockerfile" \
+  --build-arg "SPDK_BASE_DIR=$SPDK_BASE_DIR" \
+  --build-arg "DPDK_DIR=$DPDK_DIR" \
+  --build-arg "MERCURY_DIR=$MERCURY_DIR" \
+  -t "$image" \
+  "$ctx"
 
 # Floating devel tag on the dev line.
 if [ "$CEPH_RELEASE" = "devel" ]; then
   "$ENGINE" tag "$image" "${REGISTRY}/rados-nkv:devel"
 fi
-
-# Extract the RPMs built inside the builder stage to a host dir for convenience.
-# The runtime stage deletes /tmp/rpms, so grab them from the builder target
-# (cached from the build above — no recompile).
-echo "== extracting RPMs from builder stage =="
-rpmout="$repo/build/rpms"
-mkdir -p "$rpmout"
-"$ENGINE" build --target builder -f "$ctx/packaging/container/Dockerfile" \
-  -t rados-nkv-builder:"$tag" "$ctx"
-bcid=$("$ENGINE" create rados-nkv-builder:"$tag")
-"$ENGINE" cp "$bcid":/rpms/. "$rpmout"/ || true
-"$ENGINE" rm "$bcid" >/dev/null 2>&1 || true
-echo "== RPMs at $rpmout =="
-ls -1 "$rpmout" || true
 
 if [ "$push" = "1" ]; then
   echo "== pushing $image =="
@@ -94,3 +114,4 @@ if [ "$push" = "1" ]; then
 fi
 
 echo "== done: $image =="
+"$ENGINE" images "${REGISTRY}/rados-nkv" || true

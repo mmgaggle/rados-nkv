@@ -6,39 +6,57 @@
 #  the Free Software Foundation.  See file COPYING.
 #
 #
-# rados-nkv — bring an SPDK NVMe-KV-on-RADOS target up or down with one command.
+# rados-nkv — bring an SPDK NVMe-KV target up or down with one command.
 #
-# Wraps the SPDK JSON-RPC sequence (scripts/rpc.py) that stands up a CSI=KV
-# namespace over the VFIOUSER transport, backed by either a librados kvdev
-# (real Ceph) or an in-memory kvdev (no cluster needed). The resulting
-# vfu_addr is what rocm-xio (--controller), the NIXL RADOS_NKV backend
-# (vfu_addr), and rados-nkv-weights (NvmeKvClient) all attach to.
+# OUT-OF-TREE structure (Slice I, spdk-7sr.17.10): the KV bdev forwarder is now
+# the out-of-tree `bdev_kvrados` module loaded by the custom `nkv_tgt` app, built
+# against an UNMODIFIED SPDK base (Gerrit 28298 + memory_domain). The former
+# in-tree kvdev_* RPCs (kvdev_rados_register_cluster / kvdev_rados_create /
+# kvdev_mem_create / nvmf_subsystem_add_kv_ns) are GONE. The new sequence is:
+#
+#   nvmf_create_transport -t VFIOUSER
+#   bdev_kvrados_create  -b <bdev>  --executor-endpoint <NA addr>   (the forwarder)
+#   nvmf_create_subsystem <nqn>
+#   nvmf_subsystem_add_ns <nqn> <bdev>     (CSI=KV auto-detected from the bdev)
+#   nvmf_subsystem_add_listener <nqn> -t VFIOUSER -a <vfu-dir> -s 0
+#
+# bdev_kvrados is a pure FORWARDER: every Store/Retrieve/Delete/Exist/List is
+# forwarded over Mercury to a running rados-nkvx executor (nkvx_service). So an
+# executor endpoint is ALWAYS required. Two ways to supply it (REMOTE_EXECUTOR /
+# --remote-executor wins; else the addr-file the executor publishes):
+#
+#   REMOTE_EXECUTOR   executor NA address (e.g. ofi+tcp://127.0.0.1:1234) — a
+#                     deterministic listen string can be used verbatim.
+#   EXECUTOR_ADDR_FILE  path the executor wrote its self-address to (na+sm://...
+#                     dynamic addresses); read here if REMOTE_EXECUTOR is empty.
+#
+# The "backend" (mem vs rados) is now an EXECUTOR-side choice (nkvx_service
+# --mem-object … | --rados-pool …); the front is backend-agnostic. BACKEND is
+# kept only to pick a default bdev name and to surface intent in logs.
 #
 # Usage:
-#   scripts/rados-nkv up [options]      # create transport + backend + subsystem + ns + listener
+#   scripts/rados-nkv up [options]      # transport + forwarder + subsystem + ns + listener
 #   scripts/rados-nkv down [options]    # tear it back down
-#   scripts/rados-nkv status [options]  # show subsystems / clusters
+#   scripts/rados-nkv status [options]  # show subsystems / bdevs
 #   scripts/rados-nkv help
 #
-# Assumes an nvmf_tgt is already running (see docs/demo-e2e.md). Every setting
+# Assumes an nkv_tgt is already running (the entrypoint starts it). Every setting
 # has an env-var default that a flag overrides:
 #
 #   SPDK_ROOT     SPDK tree with scripts/rpc.py     (default: <repo>/spdk)
-#   RPC_SOCK      nvmf_tgt RPC socket               (default: /var/run/spdk.sock)
-#   BACKEND       rados | mem                       (default: rados; --mem = mem)
-#   POOL          Ceph pool (maps to subsystem)     (default: kvpool)
-#   CEPH_NS       Ceph namespace (maps to KV ns)    (default: kvns)
+#   RPC_SOCK      nkv_tgt RPC socket                (default: /var/run/spdk.sock)
+#   BACKEND       rados | mem (label/bdev-name only)(default: rados; --mem = mem)
+#   POOL          Ceph pool (label only)            (default: kvpool)
+#   CEPH_NS       Ceph namespace (label only)       (default: kvns)
 #   NQN           subsystem NQN                     (default: nqn.2026-06.io.ceph-gpu:kv)
 #   SERIAL        subsystem serial                  (default: SPDKKVR01)
 #   VFU_DIR       VFIOUSER listener directory       (default: /var/run/muser/domain/kv)
-#   CLUSTER       rados cluster handle name         (default: ceph0)
-#   KVDEV         kvdev name                        (default: KvRados0 / KvMem0)
-#   CEPH_USER     Ceph client id                    (default: admin)
-#   CEPH_CONF     ceph.conf path                    (default: /etc/ceph/ceph.conf)
-#   CEPH_KEYRING  keyring path                      (default: <dir of CEPH_CONF>/keyring)
+#   KVDEV         kvrados bdev name                 (default: KvRados0 / KvMem0)
 #   READ_ONLY     0 | 1  (--read-only sets 1)       (default: 0)
-#   REMOTE_EXECUTOR rados-nkvx exec address (two-tier; rados backend only)
-#                                                   (default: empty = single-tier, in-process Exec)
+#   REMOTE_EXECUTOR    executor NA address          (default: empty — see EXECUTOR_ADDR_FILE)
+#   EXECUTOR_ADDR_FILE addr-file the executor wrote  (default: empty)
+#   EXECUTOR_WAIT      seconds to wait for the addr-file (default: 30)
+#   MAX_KEY_SIZE / MAX_VALUE_SIZE / NUM_KEYS  KV identify caps (optional)
 #   TR_QDEPTH     VFIOUSER queue depth              (default: 1024)
 #   TR_MAXQ       VFIOUSER max qpairs               (default: 16)
 #
@@ -56,13 +74,14 @@ CEPH_NS="${CEPH_NS:-kvns}"
 NQN="${NQN:-nqn.2026-06.io.ceph-gpu:kv}"
 SERIAL="${SERIAL:-SPDKKVR01}"
 VFU_DIR="${VFU_DIR:-/var/run/muser/domain/kv}"
-CLUSTER="${CLUSTER:-ceph0}"
 KVDEV="${KVDEV:-}"
-CEPH_USER="${CEPH_USER:-admin}"
-CEPH_CONF="${CEPH_CONF:-/etc/ceph/ceph.conf}"
-CEPH_KEYRING="${CEPH_KEYRING:-}"
 READ_ONLY="${READ_ONLY:-0}"
 REMOTE_EXECUTOR="${REMOTE_EXECUTOR:-}"
+EXECUTOR_ADDR_FILE="${EXECUTOR_ADDR_FILE:-}"
+EXECUTOR_WAIT="${EXECUTOR_WAIT:-30}"
+MAX_KEY_SIZE="${MAX_KEY_SIZE:-}"
+MAX_VALUE_SIZE="${MAX_VALUE_SIZE:-}"
+NUM_KEYS="${NUM_KEYS:-}"
 TR_QDEPTH="${TR_QDEPTH:-1024}"
 TR_MAXQ="${TR_MAXQ:-16}"
 
@@ -81,12 +100,9 @@ while [ $# -gt 0 ]; do
 		--namespace)    CEPH_NS="$2"; shift ;;
 		--nqn)          NQN="$2"; shift ;;
 		--vfu-dir)      VFU_DIR="$2"; shift ;;
-		--cluster)      CLUSTER="$2"; shift ;;
 		--kvdev)        KVDEV="$2"; shift ;;
-		--user)         CEPH_USER="$2"; shift ;;
-		--conf)         CEPH_CONF="$2"; shift ;;
-		--keyring)      CEPH_KEYRING="$2"; shift ;;
 		--remote-executor) REMOTE_EXECUTOR="$2"; shift ;;
+		--addr-file)    EXECUTOR_ADDR_FILE="$2"; shift ;;
 		-h|--help)      CMD=help ;;
 		*)              die "unknown option: $1 (try 'rados-nkv help')" ;;
 	esac
@@ -95,49 +111,74 @@ done
 
 # derived defaults
 [ -n "$KVDEV" ] || { [ "$BACKEND" = mem ] && KVDEV=KvMem0 || KVDEV=KvRados0; }
-[ -n "$CEPH_KEYRING" ] || CEPH_KEYRING="$(dirname "$CEPH_CONF")/keyring"
 VFU_ADDR="$VFU_DIR/0"
 RPC="$SPDK_ROOT/scripts/rpc.py"
 
-rpc()      { "$RPC" -s "$RPC_SOCK" "$@"; }                 # must succeed
-rpc_try()  { "$RPC" -s "$RPC_SOCK" "$@" 2>/dev/null || true; }  # idempotent / best-effort
+# The out-of-tree bdev_kvrados_* methods are not built into the base SPDK
+# rpc.py; a small plugin (scripts/rpc_plugin_kvrados.py) adds them. Put this
+# script's dir on PYTHONPATH so `--plugin rpc_plugin_kvrados` imports it, and
+# the SPDK python package so the plugin's `from spdk.rpc.cmd_parser` resolves.
+export PYTHONPATH="${SCRIPT_DIR}:${SPDK_ROOT}/python${PYTHONPATH:+:$PYTHONPATH}"
+RPC_PLUGIN_ARGS=( --plugin rpc_plugin_kvrados )
+
+rpc()      { "$RPC" "${RPC_PLUGIN_ARGS[@]}" -s "$RPC_SOCK" "$@"; }                 # must succeed
+rpc_try()  { "$RPC" "${RPC_PLUGIN_ARGS[@]}" -s "$RPC_SOCK" "$@" 2>/dev/null || true; }  # idempotent / best-effort
 
 preflight() {
 	[ -x "$RPC" ] || [ -f "$RPC" ] || die "rpc.py not found at $RPC (set --spdk / SPDK_ROOT)"
 	rpc spdk_get_version >/dev/null 2>&1 || \
-		die "no nvmf_tgt reachable on $RPC_SOCK — start it first (see docs/demo-e2e.md)"
+		die "no nkv_tgt reachable on $RPC_SOCK — start it first (the entrypoint does)"
+}
+
+# Resolve the executor endpoint AND gate on the executor being ready. When an
+# addr-file is configured, wait for it to be non-empty first (the executor writes
+# it once it is listening) — this is the readiness barrier. Then: explicit
+# REMOTE_EXECUTOR wins as the endpoint string (it is the deterministic listen
+# address, e.g. ofi+tcp://127.0.0.1:1234); otherwise the addr-file contents are
+# the endpoint (e.g. a dynamic na+sm:// address).
+resolve_executor() {
+	local addr=""
+	if [ -n "$EXECUTOR_ADDR_FILE" ]; then
+		local tries=$(( EXECUTOR_WAIT * 10 ))
+		while [ "$tries" -gt 0 ]; do
+			if [ -s "$EXECUTOR_ADDR_FILE" ]; then
+				addr="$(tr -d '[:space:]' < "$EXECUTOR_ADDR_FILE")"
+				[ -n "$addr" ] && break
+			fi
+			tries=$((tries - 1)); sleep 0.1
+		done
+		[ -n "$addr" ] || { [ -n "$REMOTE_EXECUTOR" ] || die "timed out waiting for executor addr-file $EXECUTOR_ADDR_FILE"; }
+	fi
+	if [ -n "$REMOTE_EXECUTOR" ]; then
+		echo "$REMOTE_EXECUTOR"; return 0
+	fi
+	[ -n "$addr" ] && { echo "$addr"; return 0; }
+	die "no executor endpoint: set REMOTE_EXECUTOR or EXECUTOR_ADDR_FILE (bdev_kvrados is a forwarder)"
 }
 
 # ---- subcommands ---------------------------------------------------------
 do_up() {
 	preflight
-	local tier="single-tier (in-process Exec)"
-	[ "$BACKEND" = rados ] && [ -n "$REMOTE_EXECUTOR" ] && tier="two-tier (executor=$REMOTE_EXECUTOR)"
-	echo "rados-nkv up: backend=$BACKEND nqn=$NQN read_only=$READ_ONLY tier: $tier"
+	local ep; ep="$(resolve_executor)"
+	echo "rados-nkv up: backend=$BACKEND nqn=$NQN read_only=$READ_ONLY executor=$ep"
 
 	# 1. VFIOUSER transport (idempotent — tolerated if it already exists)
 	rpc_try nvmf_create_transport -t VFIOUSER -q "$TR_QDEPTH" -m "$TR_MAXQ"
 
-	# 2. KV backend device
-	if [ "$BACKEND" = rados ]; then
-		[ -f "$CEPH_CONF" ] || die "ceph conf not found: $CEPH_CONF (set --conf / CEPH_CONF)"
-		echo "  → kvdev_rados_register_cluster $CLUSTER (user=$CEPH_USER conf=$CEPH_CONF)"
-		rpc_try kvdev_rados_register_cluster "$CLUSTER" \
-			--user "$CEPH_USER" --config-file "$CEPH_CONF" --key-file "$CEPH_KEYRING"
-		local remote=(); [ -n "$REMOTE_EXECUTOR" ] && remote=(--remote-executor "$REMOTE_EXECUTOR")
-		echo "  → kvdev_rados_create $KVDEV $CLUSTER $POOL --namespace $CEPH_NS ${remote[*]}"
-		rpc kvdev_rados_create "$KVDEV" "$CLUSTER" "$POOL" --namespace "$CEPH_NS" "${remote[@]}"
-	else
-		echo "  → kvdev_mem_create $KVDEV"
-		rpc kvdev_mem_create "$KVDEV"
-	fi
+	# 2. KV forwarder bdev (bdev_kvrados). Forwards KV verbs to the executor.
+	local kv_args=( bdev_kvrados_create -b "$KVDEV" --executor-endpoint "$ep" )
+	[ "$READ_ONLY" = 1 ]       && kv_args+=( --read-only )
+	[ -n "$MAX_KEY_SIZE" ]     && kv_args+=( --max-key-size "$MAX_KEY_SIZE" )
+	[ -n "$MAX_VALUE_SIZE" ]   && kv_args+=( --max-value-size "$MAX_VALUE_SIZE" )
+	[ -n "$NUM_KEYS" ]         && kv_args+=( --num-keys "$NUM_KEYS" )
+	echo "  → ${kv_args[*]}"
+	rpc "${kv_args[@]}"
 
-	# 3. subsystem + CSI=KV namespace
+	# 3. subsystem + KV namespace (CSI=KV auto-detected from the kvrados bdev)
 	echo "  → nvmf_create_subsystem $NQN"
 	rpc_try nvmf_create_subsystem "$NQN" -s "$SERIAL" -a
-	local ro=(); [ "$READ_ONLY" = 1 ] && ro=(--read-only)
-	echo "  → nvmf_subsystem_add_kv_ns $NQN $KVDEV ${ro[*]}"
-	rpc nvmf_subsystem_add_kv_ns "$NQN" "$KVDEV" "${ro[@]}"
+	echo "  → nvmf_subsystem_add_ns $NQN $KVDEV"
+	rpc nvmf_subsystem_add_ns "$NQN" "$KVDEV"
 
 	# 4. VFIOUSER listener
 	mkdir -p "$VFU_DIR"
@@ -151,12 +192,7 @@ do_down() {
 	preflight
 	echo "rados-nkv down: nqn=$NQN backend=$BACKEND"
 	rpc_try nvmf_delete_subsystem "$NQN"          # also drops its listeners + ns
-	if [ "$BACKEND" = rados ]; then
-		rpc_try kvdev_rados_delete "$KVDEV"
-		rpc_try kvdev_rados_unregister_cluster "$CLUSTER"
-	else
-		rpc_try kvdev_mem_delete "$KVDEV"
-	fi
+	rpc_try bdev_kvrados_delete "$KVDEV"
 	echo "KV target torn down (VFIOUSER transport left in place)"
 }
 
@@ -164,10 +200,8 @@ do_status() {
 	preflight
 	echo "== subsystems =="
 	rpc nvmf_get_subsystems
-	if [ "$BACKEND" = rados ]; then
-		echo "== rados clusters =="
-		rpc_try kvdev_rados_get_clusters
-	fi
+	echo "== bdevs =="
+	rpc_try bdev_get_bdevs
 }
 
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d;s/^# \{0,1\}//'; }

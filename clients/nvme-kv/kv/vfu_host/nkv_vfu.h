@@ -26,6 +26,25 @@
 
 #include <linux/vfio.h>		/* VFIO_PCI_*_REGION_INDEX */
 
+/*
+ * KV vendor extensions (Exec osize/op_id in CDW12/13, Store TTL in CDW12) were
+ * carried as named bitfields in the OLD in-tree SPDK fork's nvme_spec.h. The
+ * out-of-tree base SPDK (Gerrit 28298 KV series) ships only the ratified KV
+ * opcodes and has no cdw12_bits.kv_exec / cdw12_bits.kv_store / TTL_VALID, so
+ * those references are written via the raw CDW words here (the named fields were
+ * full-width :32, so cmd.cdwNN == cmd.cdwNN_bits.<field>) and the TTL Store
+ * Option bit is provided as a fallback. This keeps nkv_vfu.h building against
+ * BOTH the old fork and the unmodified base, with byte-identical wire output.
+ */
+#ifndef SPDK_NVME_KV_STORE_OPT_TTL_VALID
+#define SPDK_NVME_KV_STORE_OPT_TTL_VALID (1u << 3)
+#endif
+/* KV Exec is a vendor opcode (ADR-0005); 0x83 in the old fork. Absent from the
+ * ratified base spec, so define it for the out-of-tree client build. */
+#ifndef SPDK_NVME_OPC_KV_EXEC
+#define SPDK_NVME_OPC_KV_EXEC 0x83
+#endif
+
 #define ADMIN_Q_ENTRIES	16
 #define IO_Q_ENTRIES	128
 #define IO_QID		1
@@ -294,34 +313,26 @@ nvfu_kv_set_key(struct spdk_nvme_cmd *cmd, const char *key, uint8_t key_len)
 	}
 }
 
+static inline int nvfu_kv_store_lk(struct nvfu_dev *d, uint32_t nsid, const char *key,
+				   uint8_t key_len, const void *value, uint32_t value_len);
+static inline int nvfu_kv_retrieve_lk(struct nvfu_dev *d, uint32_t nsid, const char *key,
+				      uint8_t key_len, void *out, uint32_t out_len,
+				      uint32_t *got_len);
+
+/*
+ * KV Store for keys <= 16 bytes. The out-of-tree bdev_kvrados forwarder (and the
+ * rados-nkvx executor it forwards to) parse the key from the IN-PAYLOAD
+ * [u16 key_len][key][value] prefix at the head of the DPTR — the legacy CDW key
+ * slots (CDW2/3/14/15) are NOT consulted for our command set. So this short-key
+ * helper routes through the same in-payload encoding as the long-key path; the
+ * encoding is uniform for any key 1..255 B (ADR-0014). (It previously staged the
+ * key in CDW slots, which the in-tree kvdev read but the forwarder ignores.)
+ */
 static inline int
 nvfu_kv_store(struct nvfu_dev *d, uint32_t nsid, const char *key, const void *value,
 	      uint32_t value_len)
 {
-	struct spdk_nvme_cmd cmd;
-	void *buf;
-	uint64_t iova;
-	int status;
-
-	memset(&cmd, 0, sizeof(cmd));
-	buf = nvfu_dma_alloc(spdk_max(value_len, 4096), &iova);
-	if (!buf) {
-		return -ENOMEM;
-	}
-	memcpy(buf, value, value_len);
-	spdk_wmb();
-	cmd.opc = SPDK_NVME_OPC_KV_STORE;
-	cmd.nsid = nsid;
-	cmd.dptr.prp.prp1 = iova;
-	cmd.cdw10_bits.kv.vsize = value_len;
-	nvfu_kv_set_key(&cmd, key, (uint8_t)strlen(key));
-	status = nvfu_submit_poll(d, &d->io, &cmd, NULL);
-	spdk_dma_free(buf);
-	if (status != 0) {
-		fprintf(stderr, "KV Store failed: status=0x%x\n", status);
-		return -EIO;
-	}
-	return 0;
+	return nvfu_kv_store_lk(d, nsid, key, (uint8_t)strlen(key), value, value_len);
 }
 
 /* One vfio-user DMA region == one DPDK hugepage (2 MiB). The target maps each
@@ -332,38 +343,16 @@ nvfu_kv_store(struct nvfu_dev *d, uint32_t nsid, const char *key, const void *va
 static inline struct spdk_nvme_sgl_descriptor *
 nvfu_sgl_set_dptr(struct spdk_nvme_cmd *cmd, uint64_t buf_iova, uint32_t len, int *err);
 
+/*
+ * KV Retrieve for keys <= 16 bytes — routes through the in-payload long-key path
+ * for the same reason as nvfu_kv_store above (the forwarder reads the key from
+ * the [u16 key_len][key] DPTR prefix, not the CDW key slots).
+ */
 static inline int
 nvfu_kv_retrieve(struct nvfu_dev *d, uint32_t nsid, const char *key, void *out,
 		 uint32_t out_len, uint32_t *got_len)
 {
-	struct spdk_nvme_cmd cmd;
-	struct spdk_nvme_cpl cpl;
-	void *buf;
-	uint64_t iova;
-	int status;
-
-	memset(&cmd, 0, sizeof(cmd));
-	memset(&cpl, 0, sizeof(cpl));
-	buf = nvfu_dma_alloc(spdk_max(out_len, 4096), &iova);
-	if (!buf) {
-		return -ENOMEM;
-	}
-	cmd.opc = SPDK_NVME_OPC_KV_RETRIEVE;
-	cmd.nsid = nsid;
-	cmd.dptr.prp.prp1 = iova;
-	cmd.cdw10_bits.kv.vsize = out_len;
-	nvfu_kv_set_key(&cmd, key, (uint8_t)strlen(key));
-	status = nvfu_submit_poll(d, &d->io, &cmd, &cpl);
-	if (status != 0) {
-		fprintf(stderr, "KV Retrieve failed: status=0x%x\n", status);
-		spdk_dma_free(buf);
-		return -EIO;
-	}
-	spdk_rmb();
-	*got_len = spdk_min(cpl.cdw0, out_len);
-	memcpy(out, buf, *got_len);
-	spdk_dma_free(buf);
-	return 0;
+	return nvfu_kv_retrieve_lk(d, nsid, key, (uint8_t)strlen(key), out, out_len, got_len);
 }
 
 /*
@@ -425,11 +414,12 @@ nvfu_kv_store_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t key
 }
 
 /*
- * long-key KV Retrieve. The DPTR carries [u16 key_len][key] at its
- * head (host->device) and the value is returned into the same buffer at offset 0
- * (device->host), overwriting the key prefix; cpl.cdw0 reports the true stored
- * length. CDW10 (vsize) is the host buffer size for the value. The buffer must be
- * large enough for both the [u16 key_len][key] request and the returned value.
+ * long-key KV Retrieve. The DPTR carries [u16 key_len][key] at its head
+ * (host->device); per the ratified wire format (docs/wire-format.md), the value
+ * is returned into the segment FOLLOWING the key head (device->host), i.e. at
+ * offset value_off = sizeof(u16)+key_len — NOT at offset 0. cpl.cdw0 reports the
+ * true stored length. CDW10 (vsize) is the host buffer size for the value. The
+ * buffer must hold the [u16 key_len][key] head AND the returned value after it.
  */
 static inline int
 nvfu_kv_retrieve_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t key_len,
@@ -442,8 +432,11 @@ nvfu_kv_retrieve_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t 
 	uint64_t iova;
 	uint16_t klp = key_len;
 	uint32_t head_len = (uint32_t)sizeof(uint16_t) + key_len;
-	/* The target maps max(head_len, out_len): the key prefix in, the value out. */
-	uint32_t xfer_len = spdk_max(head_len, out_len);
+	/* The DPTR region carries the key head IN (host->device) followed by the
+	 * value OUT (device->host) at offset head_len — the value is returned into
+	 * the segment FOLLOWING the key head (docs/wire-format.md), so the mapped
+	 * region must span head_len + out_len. */
+	uint32_t xfer_len = head_len + out_len;
 	uint32_t bufsz = spdk_max(xfer_len, 4096);
 	int status, err = 0;
 
@@ -479,7 +472,9 @@ nvfu_kv_retrieve_lk(struct nvfu_dev *d, uint32_t nsid, const char *key, uint8_t 
 	}
 	spdk_rmb();
 	*got_len = spdk_min(cpl.cdw0, out_len);
-	memcpy(out, buf, *got_len);
+	/* The value was returned at offset head_len (after the [u16 key_len][key]
+	 * head), per the ratified wire format. */
+	memcpy(out, (char *)buf + head_len, *got_len);
 	spdk_dma_free(buf);
 	return 0;
 }
@@ -599,8 +594,8 @@ nvfu_kv_exec(struct nvfu_dev *d, uint32_t nsid, const char *key, uint32_t op_id,
 	cmd.opc = SPDK_NVME_OPC_KV_EXEC;
 	cmd.nsid = nsid;
 	cmd.cdw10_bits.kv.vsize = payload_len;		/* request payload length */
-	cmd.cdw12_bits.kv_exec.osize = out_len;		/* output buffer size */
-	cmd.cdw13_bits.kv_exec.op_id = op_id;
+	cmd.cdw12 = out_len;		/* KV Exec output buffer size (vendor ext) */
+	cmd.cdw13 = op_id;		/* KV Exec op_id (vendor ext) */
 
 	/* Region-bounded SGL so a >2 MiB result scatters correctly (a single
 	 * data-block descriptor cannot cross a 2 MiB DMA region). */
@@ -711,7 +706,7 @@ nvfu_kv_xfer_sgl(struct nvfu_dev *d, uint32_t nsid, uint8_t opc, const char *key
 	if (opc == SPDK_NVME_OPC_KV_STORE) {
 		cmd.cdw11_bits.kv.ro = ro;
 		if (ro & SPDK_NVME_KV_STORE_OPT_TTL_VALID) {
-			cmd.cdw12_bits.kv_store.ttl = ttl;
+			cmd.cdw12 = ttl;	/* KV Store TTL (vendor ext) */
 		}
 	}
 	nvfu_kv_set_key(&cmd, key, (uint8_t)strlen(key));
