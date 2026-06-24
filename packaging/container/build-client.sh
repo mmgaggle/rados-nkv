@@ -27,12 +27,17 @@ CEPH_RELEASE="${CEPH_RELEASE:-devel}"
 ENGINE="${ENGINE:-podman}"
 push="${PUSH:-0}"
 with_gpu="${WITH_GPU:-0}"
+gpu_arch="${GPU_ARCH:-gfx1151}"
 
 version=$(cat "$repo/VERSION")
-tag="${CEPH_RELEASE}_v${version}"
+base_tag="${CEPH_RELEASE}_v${version}"
+# GPU builds get a distinct '-gpu' tag so they never clobber the lean CPU image.
+suffix=""; [ "$with_gpu" = "1" ] && suffix="-gpu"
+tag="${base_tag}${suffix}"
 image_name="rados-nkv-client"
 image="${REGISTRY}/${image_name}:${tag}"
-builder="${BUILDER:-localhost/rados-nkv-builder:${tag}}"
+# The builder image is GPU-agnostic — always reference the base tag.
+builder="${BUILDER:-localhost/rados-nkv-builder:${base_tag}}"
 
 # The build REQUIRES the prebuilt SPDK in the builder image. Fail early and
 # clearly if it is absent — we deliberately do NOT recompile SPDK here.
@@ -75,18 +80,19 @@ echo "== building $image (engine=$ENGINE, builder=$builder, WITH_GPU=$with_gpu) 
   -f "$ctx/packaging/container/Dockerfile.rkv" \
   --build-arg "BUILDER=$builder" \
   --build-arg "WITH_GPU=$with_gpu" \
+  --build-arg "GPU_ARCH=$gpu_arch" \
   -t "$image" \
   "$ctx"
 
-# Floating devel tag on the dev line.
+# Floating devel tag on the dev line (CPU: :devel, GPU: :devel-gpu).
 if [ "$CEPH_RELEASE" = "devel" ]; then
-  "$ENGINE" tag "$image" "${REGISTRY}/${image_name}:devel"
+  "$ENGINE" tag "$image" "${REGISTRY}/${image_name}:devel${suffix}"
 fi
 
 if [ "$push" = "1" ]; then
   echo "== pushing $image =="
   "$ENGINE" push "$image"
-  [ "$CEPH_RELEASE" = "devel" ] && "$ENGINE" push "${REGISTRY}/${image_name}:devel"
+  [ "$CEPH_RELEASE" = "devel" ] && "$ENGINE" push "${REGISTRY}/${image_name}:devel${suffix}"
 fi
 
 echo "== done: $image =="

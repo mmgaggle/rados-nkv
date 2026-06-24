@@ -18,10 +18,15 @@
 ARG BUILDER=localhost/rados-nkv-builder:devel_v0.1.0
 ARG FEDORA_VERSION=44
 ARG WITH_GPU=0
+# AMD GPU offload target for the gpu-native HIP kernel (WITH_GPU=1). Default
+# gfx1151 (Strix Halo); override for other GPUs. Fedora 44 ships ROCm 7.1.1 whose
+# hipcc compiles gfx1151.
+ARG GPU_ARCH=gfx1151
 
 # ---------------------------------------------------------------------------
 FROM ${BUILDER} AS rkv-builder
 ARG WITH_GPU
+ARG GPU_ARCH
 
 # CPU build needs the Rust toolchain plus the link-time devel packages whose
 # .so symlinks the base builder image does NOT carry: rdma-core-devel
@@ -53,6 +58,7 @@ ENV NKVX_SPDK_BUILD=/src/spdk/build
 # Build the binary. CPU is the default (ROCm-free); WITH_GPU=1 adds gpu-native.
 RUN if [ "${WITH_GPU}" = "1" ]; then \
         export NKVX_HIPCC="${NKVX_HIPCC:-$(command -v hipcc || echo /usr/bin/hipcc)}"; \
+        export HIPCC_COMPILE_FLAGS_APPEND="--offload-arch=${GPU_ARCH}"; \
         cargo build --release --features gpu-native; \
     else \
         cargo build --release; \
@@ -61,6 +67,7 @@ RUN if [ "${WITH_GPU}" = "1" ]; then \
 
 # ---------------------------------------------------------------------------
 FROM fedora:${FEDORA_VERSION} AS runtime
+ARG WITH_GPU
 LABEL org.opencontainers.image.title="rados-nkv-client" \
       org.opencontainers.image.description="rkv — ergonomic Rust CLI for the NVMe-KV (rados-nkvx) datapath over vfio-user" \
       org.opencontainers.image.source="https://github.com/mmgaggle/rados-nkv"
@@ -85,6 +92,12 @@ RUN dnf install -y \
         fuse3-libs \
         keyutils-libs \
     && dnf clean all
+
+# WITH_GPU: the gpu-native binary links libamdhip64 (ROCm HIP runtime) for the
+# in-process GPU-initiated datapath. Install the ROCm runtime so it resolves at
+# load time; the GPU itself is exposed at run time via --device /dev/kfd
+# /dev/dri (see compose `gpu` profile / README).
+RUN if [ "${WITH_GPU}" = "1" ]; then dnf install -y rocm-runtime && dnf clean all; fi
 
 # The rkv binary.
 COPY --from=rkv-builder /src/clients/rkv/target/release/rkv /usr/bin/rkv
