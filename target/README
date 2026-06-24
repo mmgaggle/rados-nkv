@@ -1,0 +1,25 @@
+rados-nkv target/ — KV bdev forwarder (out-of-tree against UNMODIFIED SPDK)
+==========================================================================
+
+Build knobs we own (NOT SPDK's)
+-------------------------------
+
+These sources build against an UNMODIFIED SPDK (Gerrit 28298 + memory_domain),
+which has no Mercury support. So the Mercury (inter-tier RPC) build knob is OURS,
+not SPDK's generated spdk/config.h:
+
+  NKVX_WITH_MERCURY
+      Gates the Mercury front-bridge code paths (kvdev_rados_nkvx_front.{c,h} and
+      every call site in bdev_kvrados.c). Define it by passing -DNKVX_WITH_MERCURY
+      from the build (target/Makefile, and the umbrella rados-nkvx/Makefile — those
+      Makefiles land in later slices E/F). Without the macro, the forwarder builds
+      as a stock, Mercury-less module that is byte-identical to upstream.
+
+      Replaces the former in-tree SPDK_CONFIG_* mercury macro, which only existed
+      because Mercury support used to be compiled into our SPDK fork via
+      `./configure --with-mercury`. In the out-of-tree world there is no such fork.
+
+  SPDK_CONFIG_WASM  (still SPDK's — left as-is)
+      The WASM Exec-runtime guard in kvdev_rados_nkvx_wasm.c comes from SPDK's
+      config.h and is unrelated to the Mercury knob above; it is intentionally NOT
+      renamed here.
