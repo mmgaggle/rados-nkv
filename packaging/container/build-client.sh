@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
-# Stage a context and build the rados-nkv-client image (the `rkv` Rust CLI).
+# Stage a context and build the rados-nkv-client image (the `rkv` Rust CLI),
+# OUT-OF-TREE against the pre-built SPDK base (Slice I, spdk-7sr.17.10).
 #
-# This is the client counterpart to build-clean.sh. It does NOT rebuild SPDK:
-# it reuses the prebuilt SPDK inside the builder image
-# (localhost/rados-nkv-builder:<tag>, produced by build-clean.sh). If that
-# builder image is missing, run build-clean.sh first.
-#
-# A dedicated context dir is staged (rather than editing the shared
-# .dockerignore) so the base nkv/nkvx image stays lean: the base build keeps
-# excluding clients/rkv, while this build's context explicitly includes it.
+# Unlike the former build (which reused the prebuilt SPDK inside a separate
+# builder image), this is SELF-CONTAINED: it stages the SPDK base tree + the
+# STATIC DPDK archives the rkv build.rs links, plus the rkv crate and the
+# vfu_host header it #includes, then the Dockerfile compiles rkv in-image. rkv
+# links SPDK statically, so the runtime image carries no SPDK shared libs.
 #
 # Env knobs (all optional):
-#   REGISTRY   default quay.io/mmgaggle
-#   ENGINE     default podman   (rootless build)
-#   PUSH       default 0        (1 to push)
-#   WITH_GPU   default 0        (1 builds the gpu-native/HIP path)
-#   CEPH_RELEASE default devel  (tag prefix + floating :devel)
-#   BUILDER    default localhost/rados-nkv-builder:<tag>
-#   CTX        default /tmp/nkv-client-ctx
+#   REGISTRY      default quay.io/mmgaggle
+#   ENGINE        default podman
+#   PUSH          default 0
+#   WITH_GPU      default 0        (1 builds the gpu-native/HIP path)
+#   CEPH_RELEASE  default devel    (tag prefix + floating :devel)
+#   CTX           default /tmp/nkv-client-ctx
+#   SPDK_BASE_DIR pre-built SPDK X tree      (default below)
+#   DPDK_DIR      DPDK build with STATIC librte_*.a (default below)
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -29,58 +28,59 @@ push="${PUSH:-0}"
 with_gpu="${WITH_GPU:-0}"
 gpu_arch="${GPU_ARCH:-gfx1151}"
 
+SPDK_BASE_DIR="${SPDK_BASE_DIR:-/home/kyle/src/rados-nkv-wt/slice-a/spdk}"
+# The SPDK base was built --with-shared against an EXTERNAL DPDK; its own
+# spdk/dpdk/build/lib has no static archives. The rkv build.rs links the STATIC
+# DPDK (librte_*.a). Point DPDK_DIR at a build that has them.
+DPDK_DIR="${DPDK_DIR:-/home/kyle/src/rados-nkv/spdk/dpdk/build}"
+
 version=$(cat "$repo/VERSION")
 base_tag="${CEPH_RELEASE}_v${version}"
-# GPU builds get a distinct '-gpu' tag so they never clobber the lean CPU image.
 suffix=""; [ "$with_gpu" = "1" ] && suffix="-gpu"
 tag="${base_tag}${suffix}"
 image_name="rados-nkv-client"
 image="${REGISTRY}/${image_name}:${tag}"
-# The builder image is GPU-agnostic — always reference the base tag.
-builder="${BUILDER:-localhost/rados-nkv-builder:${base_tag}}"
 
-# The build REQUIRES the prebuilt SPDK in the builder image. Fail early and
-# clearly if it is absent — we deliberately do NOT recompile SPDK here.
-if ! "$ENGINE" image exists "$builder"; then
-  cat >&2 <<EOF
-ERROR: builder image '$builder' not found.
-
-The client image reuses the prebuilt SPDK from that image; it does not rebuild
-SPDK. Build it first:
-
-  PUSH=0 packaging/container/build-clean.sh
-
-(or set BUILDER=<your builder image:tag>), then re-run this script.
-EOF
-  exit 1
-fi
+[ -e "$SPDK_BASE_DIR/build/lib/libspdk_vfio_user.a" ] || {
+  echo "FAIL: static SPDK libs not found under $SPDK_BASE_DIR/build/lib (set SPDK_BASE_DIR)" >&2; exit 1; }
+ls "$DPDK_DIR"/lib/librte_*.a >/dev/null 2>&1 || {
+  echo "FAIL: static DPDK archives (librte_*.a) not found under $DPDK_DIR/lib (set DPDK_DIR)" >&2; exit 1; }
 
 echo "== staging client context at $ctx =="
 rm -rf "$ctx"
 mkdir -p "$ctx/clients" "$ctx/packaging/container"
 
-# rkv crate (source of the build) — the binary is compiled inside the image, so
-# drop any host-side build output to keep the context small.
+# rkv crate (drop host-side build output) + the nvme-kv vfu_host header it
+# #includes (clients/nvme-kv/kv/vfu_host/nkv_vfu.h).
 rsync -a --exclude='target/' "$repo/clients/rkv"/ "$ctx/clients/rkv"/
-
-# vfu_host header that rkv's shim #includes (clients/nvme-kv/kv/vfu_host/
-# nkv_vfu.h). The header is also present in the builder image's /src, but stage
-# it so the context is self-describing.
 rsync -a "$repo/clients/nvme-kv"/ "$ctx/clients/nvme-kv"/
+
+# SPDK base tree at the SAME absolute path inside the staged spdk-base/, then
+# overlay the STATIC DPDK archives into its dpdk/build/lib so build.rs (which
+# reads <spdk>/dpdk/build/lib/librte_*.a) finds them. The base's shared DPDK
+# build dir is empty, so this populates rather than conflicts.
+echo "== staging SPDK base + static DPDK =="
+rsync -a "$SPDK_BASE_DIR"/ "$ctx/spdk-base"/
+mkdir -p "$ctx/spdk-base/dpdk/build/lib" "$ctx/spdk-base/dpdk/build/include"
+cp "$DPDK_DIR"/lib/librte_*.a "$ctx/spdk-base/dpdk/build/lib/"
+cp -r "$DPDK_DIR"/include/. "$ctx/spdk-base/dpdk/build/include/" 2>/dev/null || true
 
 # Packaging (Dockerfile.rkv + entrypoint) and the version file.
 rsync -a "$repo/packaging/container/Dockerfile.rkv" "$ctx/packaging/container/"
 rsync -a "$repo/packaging/container/rkv-entrypoint.sh" "$ctx/packaging/container/"
 cp "$repo/VERSION" "$ctx/VERSION"
 
+# Context-root ignore so nothing junky enters; the staged trees are intentional.
+printf '%s\n' '**/.git' '**/__pycache__' 'clients/rkv/target' > "$ctx/.containerignore"
+
 echo "== context size: $(du -sh "$ctx" | cut -f1) =="
 
-echo "== building $image (engine=$ENGINE, builder=$builder, WITH_GPU=$with_gpu) =="
+echo "== building $image (engine=$ENGINE, WITH_GPU=$with_gpu) =="
 "$ENGINE" build \
   -f "$ctx/packaging/container/Dockerfile.rkv" \
-  --build-arg "BUILDER=$builder" \
   --build-arg "WITH_GPU=$with_gpu" \
   --build-arg "GPU_ARCH=$gpu_arch" \
+  --build-arg "SPDK_BASE_DIR=$SPDK_BASE_DIR" \
   -t "$image" \
   "$ctx"
 
