@@ -30,15 +30,15 @@
 #include "spdk/thread.h"
 
 /* Pull the executor in as source: it depends only on spdk/thread + pthreads. */
-#include "kvdev/rados/kvdev_rados_nkvx.c"
+#include "kvdev_rados_nkvx.c"
 /* And the dlopen-backed wasm runtime, so the real-wasm path is exercised in the
  * same translation unit. With --without-wasm this is the NOT_SUPPORTED stub. */
-#include "kvdev/rados/kvdev_rados_nkvx_wasm.c"
+#include "kvdev_rados_nkvx_wasm.c"
 /* The datapath's oid sizing (KVDEV_RADOS_NKVX_OID_BUFSZ, the actual size of
  * struct kvdev_rados_io::nkvx_oid) and its key->oid encoder live here, so the
  * long-key regression below tests the SAME buffer + encoder the datapath uses.
  * This header is librados-free, so it is safe in the unit build. */
-#include "kvdev/rados/kvdev_rados.h"
+#include "kvdev_rados.h"
 
 #include "common/lib/ut_multithread.c"
 
