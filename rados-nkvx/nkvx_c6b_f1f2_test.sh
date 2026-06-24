@@ -123,7 +123,7 @@ fail=0
 echo "--- F1 input-bulk cancel (PULL stall) -> phase-2 handshake ran, no late PULL ---"
 start_svc 0 8 || exit 1
 "$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-	--key "$F1KEY" --runtime 2 --module-ns nkvx --module identity \
+	--key "$F1KEY" --runtime 1 --module-ns nkvx --module identity \
 	--osize 64 --input-len $((64*1024)) --cancel-after 0 --iters 3 \
 	--expect 0 2>&1 | sed 's/^/  /'
 drc=${PIPESTATUS[0]}
@@ -154,7 +154,7 @@ echo "--- F2 same-op_id concurrent cancel -> two distinct call_ids, no cross-abo
 rm -f "$ADDR_FILE"
 start_svc 30 0 || exit 1
 "$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-	--key "$F2KEY" --runtime 2 --module-ns nkvx --module identity \
+	--key "$F2KEY" --runtime 1 --module-ns nkvx --module identity \
 	--osize "$F2SZ" --concurrent 2 --cancel-after 4 --expect 0 2>&1 | sed 's/^/  /'
 drc=${PIPESTATUS[0]}
 [ "$drc" -eq 0 ] || { echo "  FAIL: F2 driver exit $drc"; fail=1; }
@@ -185,7 +185,7 @@ if command -v valgrind >/dev/null 2>&1; then
 	rm -f "$ADDR_FILE"; start_svc 0 8 || exit 1
 	valgrind --leak-check=full --error-exitcode=42 --errors-for-leak-kinds=definite,indirect \
 		"$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-		--key "$F1KEY" --runtime 2 --module-ns nkvx --module identity \
+		--key "$F1KEY" --runtime 1 --module-ns nkvx --module identity \
 		--osize 64 --input-len $((64*1024)) --cancel-after 0 --iters 3 --expect 0 \
 		>"$VG_LOG" 2>&1
 	vgrc=$?
@@ -200,7 +200,7 @@ if command -v valgrind >/dev/null 2>&1; then
 	rm -f "$ADDR_FILE"; start_svc 30 0 || exit 1
 	valgrind --leak-check=full --error-exitcode=42 --errors-for-leak-kinds=definite,indirect \
 		"$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-		--key "$F2KEY" --runtime 2 --module-ns nkvx --module identity \
+		--key "$F2KEY" --runtime 1 --module-ns nkvx --module identity \
 		--osize "$F2SZ" --concurrent 2 --cancel-after 4 --expect 0 \
 		>"$VG_LOG" 2>&1
 	vgrc=$?

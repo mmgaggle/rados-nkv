@@ -107,7 +107,7 @@ fail=0
 echo "--- cancel mid-PUSH (stall hook) -> ABORTED, NO late PUSH, DPTR reusable ---"
 start_svc 8 || exit 1
 "$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-	--key "$BIGKEY" --runtime 2 --module-ns nkvx --module identity \
+	--key "$BIGKEY" --runtime 1 --module-ns nkvx --module identity \
 	--osize "$BIGSZ" --cancel-after 0 --poison-after-cancel 200 --iters 3 \
 	--expect 0 --expect-sha256 "$BIGSHA" 2>&1 | sed 's/^/  /'
 drc=${PIPESTATUS[0]}
@@ -143,7 +143,7 @@ if command -v valgrind >/dev/null 2>&1; then
 	VGSHA="$(sha256sum "$WORK/vg.bin" | cut -d' ' -f1)"
 	valgrind --leak-check=full --error-exitcode=42 --errors-for-leak-kinds=definite,indirect \
 		"$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-		--key "$VGKEY" --runtime 2 --module-ns nkvx --module identity \
+		--key "$VGKEY" --runtime 1 --module-ns nkvx --module identity \
 		--osize $((1024*1024)) --cancel-after 0 --poison-after-cancel 50 --iters 3 \
 		--expect 0 --expect-sha256 "$VGSHA" \
 		>"$VG_LOG" 2>&1

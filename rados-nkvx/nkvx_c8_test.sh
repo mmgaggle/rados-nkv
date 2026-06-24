@@ -237,7 +237,7 @@ BIGSHA="$(sha256sum "$WORK/big.bin" | cut -d' ' -f1)"
 echo "--- (A) under-load: ${LOAD_ITERS}x 64 MiB Exec, content-hash each iter ---"
 start_svc 0 || exit 1
 "$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-	--key "$BIGKEY" --runtime 2 --module-ns nkvx --module identity \
+	--key "$BIGKEY" --runtime 1 --module-ns nkvx --module identity \
 	--osize "$BIGSZ" --iters "$LOAD_ITERS" --distinct 1 \
 	--expect 0 --expect-result "$BIGSZ" --expect-sha256 "$BIGSHA" 2>&1 | sed 's/^/  /'
 arc=${PIPESTATUS[0]}
@@ -259,7 +259,7 @@ assert_asan_clean "under-load"
 echo "--- (B) abort: cancel mid-PUSH -> ABORTED, NO late PUSH, DPTR reusable, ASan-clean ---"
 start_svc 8 || exit 1
 "$DRV" --listen "$FRONT_NA" --addr-file "$ADDR_FILE" \
-	--key "$BIGKEY" --runtime 2 --module-ns nkvx --module identity \
+	--key "$BIGKEY" --runtime 1 --module-ns nkvx --module identity \
 	--osize "$BIGSZ" --cancel-after 0 --poison-after-cancel 200 --iters 3 \
 	--expect 0 --expect-sha256 "$BIGSHA" 2>&1 | sed 's/^/  /'
 brc=${PIPESTATUS[0]}
