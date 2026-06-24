@@ -132,7 +132,7 @@ fi
 # Build (normal or ASan). The ASan build shares the binary path with the normal
 # build, so we force-rebuild with the requested flavor every run.
 # ---------------------------------------------------------------------------
-MAKE_ARGS=(MERCURY_PREFIX="$MERCURY_PREFIX")
+MAKE_ARGS=("RADOS_LIB_DIR=${RADOS_LIB_DIR:-/home/kyle/src/ceph/build/lib}" MERCURY_PREFIX="$MERCURY_PREFIX")
 ASAN_TAG="normal"
 if [ "$NKVX_ASAN" = "1" ]; then
 	MAKE_ARGS+=(ASAN=1 CC="$NKVX_ASAN_CC")
