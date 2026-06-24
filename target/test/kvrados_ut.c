@@ -52,8 +52,8 @@ DEFINE_STUB_V(spdk_io_device_unregister, (void *io_device,
 		spdk_io_device_unregister_cb unregister_cb));
 DEFINE_STUB(spdk_get_io_channel, struct spdk_io_channel *, (void *io_device), NULL);
 
-#ifdef SPDK_CONFIG_MERCURY
-/* With --with-mercury, bdev_kvrados.c calls into the reused nkvx front bridge.
+#ifdef NKVX_WITH_MERCURY
+/* With -DNKVX_WITH_MERCURY, bdev_kvrados.c calls into the reused nkvx front bridge.
  * This UT exercises the forwarder in isolation, so stub the bridge entry points
  * (the real implementations live in module/kvdev/rados/kvdev_rados_nkvx_front.c
  * and are covered by their own na+sm loopback tests). */
@@ -99,7 +99,7 @@ DEFINE_STUB(kvdev_rados_nkvx_front_cancel, bool, (struct nkvx_front *front,
 DEFINE_STUB(spdk_poller_register_named, struct spdk_poller *, (spdk_poller_fn fn,
 		void *arg, uint64_t period_microseconds, const char *name), NULL);
 DEFINE_STUB_V(spdk_poller_unregister, (struct spdk_poller **ppoller));
-#endif /* SPDK_CONFIG_MERCURY */
+#endif /* NKVX_WITH_MERCURY */
 
 /* Fake-channel helper (defined with the Exec tests below). The KV-I/O verbs also
  * fetch the channel ctx on their --with-mercury forward path, so they submit
