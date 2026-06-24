@@ -4,30 +4,66 @@
 # Standalone build for the rados-nkvx executor service skeleton (Slice C2) and
 # its test client. NOT part of the SPDK build graph: the executor is non-SPDK by
 # design (docs/design/slice-c-exec-rpc-mercury.md §1). Both binaries link the
-# shared C3 contract (../nkvx_exec_rpc.c) directly against Mercury and include
-# the in-tree spdk/kvdev.h (status enum only).
+# shared contract (../target/nkvx_exec_rpc.c) directly against Mercury and
+# include our KV-Exec ABI header (../target/include/spdk/kvdev.h, status enum +
+# Exec ABI). SPDK headers come from an UNMODIFIED SPDK tree (Gerrit 28298 +
+# memory_domain), referenced via SPDK_ROOT/include only.
+#
+# Slice F (spdk-7sr.17.7): the shared wire contract + wasm runtime core used to
+# live in the (now-gone) in-tree SPDK module module/kvdev/rados. They have moved
+# out-of-tree to ../target. This Makefile therefore pulls the contract
+# (nkvx_exec_rpc.c) and the wasm core (kvdev_rados_nkvx_wasm.c) from ../target,
+# our spdk/kvdev.h from ../target/include, and the wasmtime C-API headers from
+# ../target/wasmtime/include — while SPDK_ROOT points at an unmodified SPDK tree
+# used only for its public headers (spdk/stdinc.h, spdk/log.h, spdk/util.h, ...).
 #
 # Usage:
 #   make -f Makefile [MERCURY_PREFIX=<mercury-install>]      # build
 #   make -f Makefile run                                     # build + loopback test
 #   make -f Makefile clean
 # MERCURY_PREFIX defaults to the worktree's vendored install (scripts/vendor-mercury.sh).
+# SPDK_ROOT defaults to the rados-nkv submodule ../spdk; point it at a built,
+# unmodified SPDK tree (e.g. SPDK_ROOT=/path/to/unmodified/spdk) when the
+# submodule is not built in this worktree.
 
-SPDK_ROOT       ?= $(realpath $(CURDIR)/../spdk)
-RADOS_DIR       := $(SPDK_ROOT)/module/kvdev/rados
-MERCURY_PREFIX  ?= $(SPDK_ROOT)/vendor/mercury-install
+SPDK_ROOT       ?= $(abspath $(CURDIR)/../spdk)
+TARGET_DIR      := $(abspath $(CURDIR)/../target)
+
+# Mercury is vendored under the rados-nkv submodule's spdk/ tree
+# (scripts/vendor-mercury.sh installs it at spdk/vendor/mercury-install). When
+# SPDK_ROOT is the submodule (the default) that vendored install lives at
+# $(CURDIR)/../spdk/vendor/mercury-install. But Slice F lets SPDK_ROOT point at
+# an UNMODIFIED SPDK tree that carries no vendored Mercury, so the default cannot
+# be tied to SPDK_ROOT. Default to the submodule's mercury-install, and if it is
+# not built in this worktree fall back to the rados-nkv repo's vendored install
+# (the one the acceptance/--help run uses). Override MERCURY_PREFIX=<dir> to point
+# elsewhere.
+MERCURY_SUBMODULE_PREFIX := $(abspath $(CURDIR)/../spdk)/vendor/mercury-install
+MERCURY_FALLBACK_PREFIX  := /home/kyle/src/rados-nkv/spdk/vendor/mercury-install
+ifneq ($(wildcard $(MERCURY_SUBMODULE_PREFIX)/lib/pkgconfig/mercury.pc),)
+MERCURY_PREFIX  ?= $(MERCURY_SUBMODULE_PREFIX)
+else
+MERCURY_PREFIX  ?= $(MERCURY_FALLBACK_PREFIX)
+endif
 
 MERCURY_CFLAGS  := $(shell PKG_CONFIG_PATH=$(MERCURY_PREFIX)/lib/pkgconfig pkg-config --cflags mercury)
 MERCURY_LIBS    := $(shell PKG_CONFIG_PATH=$(MERCURY_PREFIX)/lib/pkgconfig pkg-config --libs mercury)
 
-# -std=gnu11 is LOAD-BEARING: the C3 wire-status SPDK_STATIC_ASSERTs in
-# ../nkvx_exec_rpc.c only fire when <assert.h> defines static_assert as a macro
-# (true under gnu11, NOT under the compiler default C23). The executor MUST build
-# the contract under gnu11 or the drift guard is decorative (design §3).
+# -std=gnu11 is LOAD-BEARING: the wire-status SPDK_STATIC_ASSERTs in
+# ../target/nkvx_exec_rpc.c only fire when <assert.h> defines static_assert as a
+# macro (true under gnu11, NOT under the compiler default C23). The executor MUST
+# build the contract under gnu11 or the drift guard is decorative (design §3).
 # -Wno-comment: the reused kvdev_rados_nkvx_wasm.h carries a benign "*x/*y"-style
 # comment that trips -Wcomment under -Werror; SPDK's own build does not gate on it.
-CFLAGS  := -g -O0 -std=gnu11 -Wall -Wextra -Werror -Wno-comment \
-           -I$(SPDK_ROOT)/include -I$(RADOS_DIR) -I$(RADOS_DIR)/wasmtime/include $(MERCURY_CFLAGS)
+# -DNKVX_WITH_MERCURY: our out-of-tree Mercury build knob (Slice D). The executor
+# always links Mercury, so it is always set here.
+# Include search order: ../target (shared contract + wasm headers, quoted
+# includes), ../target/include (our spdk/kvdev.h — NOT present in unmodified
+# SPDK), ../target/wasmtime/include (wasmtime C-API, dlopen'd), then the
+# unmodified SPDK public headers under SPDK_ROOT/include.
+CFLAGS  := -g -O0 -std=gnu11 -Wall -Wextra -Werror -Wno-comment -DNKVX_WITH_MERCURY \
+           -I$(TARGET_DIR) -I$(TARGET_DIR)/include -I$(TARGET_DIR)/wasmtime/include \
+           -I$(SPDK_ROOT)/include $(MERCURY_CFLAGS)
 LDFLAGS := $(MERCURY_LIBS) -Wl,-rpath,$(MERCURY_PREFIX)/lib
 
 # Slice C8 (bead spdk-xmu.8): ASan build of the executor for the on-rig verbs
@@ -43,8 +79,8 @@ CFLAGS  += -fsanitize=address -fno-omit-frame-pointer
 LDFLAGS += -fsanitize=address
 endif
 
-CONTRACT := $(RADOS_DIR)/nkvx_exec_rpc.c
-HEADER   := $(RADOS_DIR)/nkvx_exec_rpc.h
+CONTRACT := $(TARGET_DIR)/nkvx_exec_rpc.c
+HEADER   := $(TARGET_DIR)/nkvx_exec_rpc.h
 
 # Slice C5a: the executor backend cold-fills objects from RADOS (cold path only,
 # ADR-0009), so the service binary links librados. C5a.2 additionally reuses the
@@ -55,7 +91,7 @@ HEADER   := $(RADOS_DIR)/nkvx_exec_rpc.h
 SERVICE := nkvx_service
 CLIENT  := nkvx_exec_client
 SERVICE_SRCS := nkvx_service.c nkvx_executor.c nkvx_log_shim.c \
-                $(RADOS_DIR)/kvdev_rados_nkvx_wasm.c $(CONTRACT)
+                $(TARGET_DIR)/kvdev_rados_nkvx_wasm.c $(CONTRACT)
 SERVICE_LIBS := -lrados -lcrypto -ldl -lpthread
 
 # Fast, dependency-free unit tests for the pure ADR-0014 contract helpers
