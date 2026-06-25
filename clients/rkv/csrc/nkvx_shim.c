@@ -60,6 +60,21 @@ nkvx_env_init_once(void)
 	spdk_env_opts_init(&opts);
 	opts.name = "rados-nkv";
 	opts.env_context = (void *)"--iova-mode=va";
+	/*
+	 * Single-file hugepage segments (bead spdk-6ar). A retrieve/exec host buffer
+	 * (RETRIEVE_HINT = 4 MiB) is VA-contiguous but spans multiple 2 MiB hugepages.
+	 * SPDK's vfio-user client registers that span as ONE DMA region carrying a
+	 * SINGLE (fd, offset) (vfio_mr_map_notify -> spdk_mem_get_fd_and_offset of the
+	 * region start), and the vfio-user target mmaps the whole region MAP_SHARED
+	 * from that one fd. With the default one-file-per-page layout only the FIRST
+	 * hugepage maps to the client's real memory; the controller's writes to the
+	 * value buffer (2nd+ hugepage) land on unshared pages, so the client reads
+	 * zeros. Single-file segments back the memseg list with ONE fd at contiguous
+	 * offsets, so the target's single-fd mmap covers the whole region. The two
+	 * single-file modes are mutually exclusive in DPDK, so unlink must be off.
+	 */
+	opts.hugepage_single_segments = true;
+	opts.unlink_hugepage = false;
 	if (spdk_env_init(&opts) < 0) {
 		fprintf(stderr, "Unable to initialize SPDK env\n");
 		return -EIO;
@@ -263,10 +278,13 @@ nkvx_exec(nkvx_session *s, uint32_t nsid, const char *key, uint32_t op_id,
 	}
 	spdk_rmb();
 	/* Copy only what fits, but report the TRUE length so the caller can detect
-	 * and recover from a short buffer rather than truncating silently. */
+	 * and recover from a short buffer rather than truncating silently. The result
+	 * lands in the payload region AFTER the in-payload key head (the forwarder's
+	 * result sink is iovs[0] + value_off, value_off = sizeof(u16 key_len)+key_len),
+	 * NOT at the buffer head — read it from the same offset (bead spdk-4jq). */
 	n = spdk_min(cpl.cdw0, out_len);
 	if (n > 0) {
-		memcpy(out, buf, n);
+		memcpy(out, (char *)buf + sizeof(klp) + key_len, n);
 	}
 	if (rlen != NULL) {
 		*rlen = cpl.cdw0;
