@@ -60,23 +60,67 @@ RUN if [ "${WITH_GPU}" = "1" ]; then \
 # dpdk/build/lib by build-client.sh) at its original absolute path.
 COPY spdk-base ${SPDK_BASE_DIR}
 
-# The rkv crate + the vfu_host header it #includes (clients/nvme-kv/kv/vfu_host/
-# nkv_vfu.h) staged by build-client.sh.
+# The rkv crate + the vfu_host sources it needs: nkv_vfu.h (the rkv shim
+# #includes it) AND nkv_vfu_gpu.hip / build_gpu.sh (WITH_GPU=1 builds the
+# nkv_vfu_gpu subprocess). All staged under /src/clients by build-client.sh.
 COPY clients /src/clients
 WORKDIR /src/clients/rkv
 
 # build.rs locates the prebuilt SPDK via NKVX_SPDK_BUILD; root = its parent.
 ENV NKVX_SPDK_BUILD=${SPDK_BASE_DIR}/build
 
-# Build the binary. CPU is the default (ROCm-free); WITH_GPU=1 adds gpu-native.
-RUN if [ "${WITH_GPU}" = "1" ]; then \
-        export NKVX_HIPCC="${NKVX_HIPCC:-$(command -v hipcc || echo /usr/bin/hipcc)}"; \
-        export HIPCC_COMPILE_FLAGS_APPEND="--offload-arch=${GPU_ARCH}"; \
-        cargo build --release --features gpu-native; \
-    else \
-        cargo build --release; \
-    fi \
+# Build the rkv binary. ALWAYS the ROCm-free default (no gpu-native): rkv's
+# `--gpu` then DELEGATES to the nkv_vfu_gpu subprocess (clients/rkv/src/gpu.rs,
+# compiled only when gpu-native is OFF), so the rkv binary itself links no HIP.
+# This matches the proven GPU-initiated datapath (the nkv_vfu_gpu client builds
+# the SQE + rings the doorbell), keeping rkv portable while the GPU/ROCm weight
+# lives entirely in the separate subprocess.
+RUN cargo build --release \
     && test -x /src/clients/rkv/target/release/rkv
+
+# WITH_GPU=1: also build the nkv_vfu_gpu subprocess (the GPU-initiated client
+# rkv --gpu execs). Mirrors clients/nvme-kv/kv/vfu_host/build_gpu.sh's hipcc
+# compile + link recipe, but rooted at the prebuilt SPDK base (${SPDK_BASE_DIR})
+# instead of an in-tree submodule, so no SPDK rebuild is needed.
+#
+# Link model (same as rkv): DPDK librte_*.a + env_dpdk + isa-l/isa-l-crypto .a
+# are STATIC (only archives staged), but the base is --with-shared, so the base
+# build/lib carries BOTH .a and .so for libspdk_{vfio_user,util,log} and isa-l —
+# `-L$WT/build/lib -lspdk_*` therefore resolves to the .so (dynamic). libvfio-user
+# (.so only in this base) and libamdhip64 are dynamic too. The runtime stage
+# ships libspdk_{vfio_user,util,log}.so + libvfio-user.so + libisal*.so (in
+# /opt/rados-nkv-libs, ldconfig'd) and installs libamdhip64 via rocm-hip, so the
+# dynamic link resolves at load time. Installed at /usr/bin/nkv_vfu_gpu so rkv's
+# PATH lookup (gpu.rs find_in_path) resolves it.
+RUN if [ "${WITH_GPU}" = "1" ]; then \
+        set -eux; \
+        HIPCC="${NKVX_HIPCC:-$(command -v hipcc || echo /usr/bin/hipcc)}"; \
+        VFU=/src/clients/nvme-kv/kv/vfu_host; \
+        WT="${SPDK_BASE_DIR}"; \
+        INC="-I$WT/include \
+             -I$WT/build/libvfio-user/usr/local/include \
+             -I$WT/isa-l/.. -I$WT/isalbuild -I$WT/isa-l-crypto/.. -I$WT/isalcryptobuild \
+             -I$VFU"; \
+        "$HIPCC" --offload-arch="${GPU_ARCH}" \
+            -x hip -std=c++17 -D_GNU_SOURCE -Wno-array-bounds \
+            -c "$VFU/nkv_vfu_gpu.hip" -o "$VFU/nkv_vfu_gpu.o" $INC; \
+        "$HIPCC" "$VFU/nkv_vfu_gpu.o" -o "$VFU/nkv_vfu_gpu" \
+            -pthread -Wl,-z,relro,-z,now -Wl,-z,noexecstack \
+            -L"$WT/build/libvfio-user/usr/local/lib" -L"$WT/build/lib" \
+            -Wl,--whole-archive -Wl,--no-as-needed \
+            -lspdk_vfio_user -lspdk_util -lspdk_log \
+            -Wl,--no-whole-archive \
+            "$WT/build/lib/libspdk_env_dpdk.a" \
+            -Wl,--whole-archive \
+            $WT/dpdk/build/lib/librte_*.a \
+            -Wl,--no-whole-archive \
+            -lnuma -ldl -libverbs -lrdmacm \
+            "$WT/isa-l/.libs/libisal.a" "$WT/isa-l-crypto/.libs/libisal_crypto.a" \
+            -lvfio-user -ljson-c -pthread -lrt -luuid -lssl -lcrypto -lm \
+            -llz4 -lfuse3 -lkeyutils \
+            -lamdhip64; \
+        test -x "$VFU/nkv_vfu_gpu"; \
+    fi
 
 # ---------------------------------------------------------------------------
 FROM fedora:${FEDORA_VERSION} AS runtime
@@ -95,11 +139,28 @@ RUN dnf install -y \
         json-c libuuid openssl-libs lz4-libs fuse3-libs keyutils-libs \
     && dnf clean all
 
-# WITH_GPU: the gpu-native binary links libamdhip64 (ROCm HIP runtime).
-RUN if [ "${WITH_GPU}" = "1" ]; then dnf install -y rocm-runtime && dnf clean all; fi
+# WITH_GPU: the nkv_vfu_gpu subprocess links -lamdhip64, so it needs
+# libamdhip64.so.7 at load time. On Fedora 44 that soname is owned by rocm-hip
+# (NOT rocm-runtime, which provides the lower-level HSA/ROCr runtime and does
+# not pull rocm-hip in). Install BOTH: rocm-hip for libamdhip64 + rocm-runtime
+# for the HSA layer it depends on. Without rocm-hip the ldd gate below fails
+# with `libamdhip64.so.7 => not found`.
+RUN if [ "${WITH_GPU}" = "1" ]; then dnf install -y rocm-hip rocm-runtime && dnf clean all; fi
 
 # The rkv binary.
 COPY --from=rkv-builder /src/clients/rkv/target/release/rkv /usr/bin/rkv
+
+# The nkv_vfu_gpu subprocess (only built WITH_GPU=1). COPY the whole vfu_host
+# dir (always present) then install the binary if it was built — a bare COPY of
+# nkv_vfu_gpu would fail the WITH_GPU=0 build (missing source). On PATH at
+# /usr/bin so rkv --gpu (gpu.rs find_in_path) resolves it.
+COPY --from=rkv-builder /src/clients/nvme-kv/kv/vfu_host /tmp/vfu_host
+RUN if [ -x /tmp/vfu_host/nkv_vfu_gpu ]; then \
+        install -m 0755 /tmp/vfu_host/nkv_vfu_gpu /usr/bin/nkv_vfu_gpu; \
+    elif [ "${WITH_GPU}" = "1" ]; then \
+        echo "ERROR: WITH_GPU=1 but nkv_vfu_gpu was not built" >&2; exit 1; \
+    fi; \
+    rm -rf /tmp/vfu_host
 
 # The base SPDK was built --with-shared, so rkv links the SPDK libs DYNAMICALLY
 # (libspdk_vfio_user/util/log .so) plus libvfio-user.so. Ship those shared
@@ -125,11 +186,18 @@ COPY packaging/container/rkv-entrypoint.sh /usr/libexec/rados-nkv/rkv-entrypoint
 RUN chmod 0755 /usr/libexec/rados-nkv/rkv-entrypoint
 
 # Verify the dynamic link is fully satisfied — fail the build on any "not found".
-RUN ldd /usr/bin/rkv \
-    && if ldd /usr/bin/rkv | grep -q "not found"; then \
-        echo "ERROR: rkv has unresolved shared libraries:" >&2; \
-        ldd /usr/bin/rkv | grep "not found" >&2; \
-        exit 1; \
-    fi
+# Check rkv always, and nkv_vfu_gpu when it was installed (WITH_GPU=1). Because
+# the SPDK base is --with-shared, nkv_vfu_gpu dynamically needs libspdk_{vfio_user,
+# util,log}.so + libvfio-user.so + libisal*.so (all shipped in /opt/rados-nkv-libs
+# and ldconfig'd above) AND libamdhip64.so.7 (from rocm-hip, installed above).
+RUN for bin in /usr/bin/rkv /usr/bin/nkv_vfu_gpu; do \
+        [ -x "$bin" ] || continue; \
+        echo "== ldd $bin =="; ldd "$bin"; \
+        if ldd "$bin" | grep -q "not found"; then \
+            echo "ERROR: $bin has unresolved shared libraries:" >&2; \
+            ldd "$bin" | grep "not found" >&2; \
+            exit 1; \
+        fi; \
+    done
 
 ENTRYPOINT ["/usr/libexec/rados-nkv/rkv-entrypoint"]

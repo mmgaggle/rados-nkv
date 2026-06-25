@@ -310,8 +310,13 @@ gpu_exec_batch(struct nvfu_dev *d, uint32_t nsid, const char *prefix, uint32_t o
 		c->nsid = nsid;
 		c->dptr.prp.prp1 = buf_iova + (uint64_t)i * SLOT;
 		c->cdw10_bits.kv.vsize = payload_len;
-		c->cdw12_bits.kv_exec.osize = SLOT;
-		c->cdw13_bits.kv_exec.op_id = op_id;
+		/* KV Exec osize/op_id are vendor extensions absent from the ratified
+		 * base SPDK spec (no cdw12_bits.kv_exec / cdw13_bits.kv_exec). The named
+		 * fields were full-width :32, so write the raw CDW words instead — same
+		 * convention and byte-identical wire output as nvfu_kv_exec() in
+		 * nkv_vfu.h. (osize == KV Exec output-buffer size; op_id == executor op.) */
+		c->cdw12 = SLOT;
+		c->cdw13 = op_id;
 		c->cid = q->cid++;
 	}
 	spdk_wmb();
@@ -1030,6 +1035,25 @@ main(int argc, char **argv)
 	snprintf(ealargs, sizeof(ealargs), "--iova-mode=va%s",
 		 getenv("NKV_EAL_DEBUG") ? " --log-level=lib.eal:8" : "");
 	opts.env_context = ealargs;
+	/*
+	 * Single-file hugepage segments (bead spdk-6ar; mirrors the rkv CPU client
+	 * fix in clients/rkv/csrc/nkvx_shim.c). The GPU retrieve/exec lanes DMA host
+	 * buffers up to the controller max_io_size (NKVX_RETR_LANE_BUF = 64 MiB) that
+	 * are VA-contiguous but span many 2 MiB hugepages. SPDK's vfio-user client
+	 * registers that span as ONE DMA region carrying a SINGLE (fd, offset)
+	 * (vfio_mr_map_notify -> spdk_mem_get_fd_and_offset of the region start), and
+	 * the vfio-user target mmaps the whole region MAP_SHARED from that one fd.
+	 * With the default one-file-per-page layout only the FIRST hugepage maps to
+	 * the client's real memory; the controller's writes to the value/result
+	 * buffer (2nd+ hugepage) land on unshared pages, so the client reads zeros.
+	 * The region-bounded SGL DPTR splits the transfer correctly on the wire, but
+	 * cannot fix the underlying single-fd backing — only single-file segments
+	 * can. Single-file segments back the memseg list with ONE fd at contiguous
+	 * offsets, so the target's single-fd mmap covers the whole region. The two
+	 * single-file modes are mutually exclusive in DPDK, so unlink must be off.
+	 */
+	opts.hugepage_single_segments = true;
+	opts.unlink_hugepage = false;
 	if (spdk_env_init(&opts) < 0) {
 		fprintf(stderr, "Unable to initialize SPDK env\n");
 		return 1;
