@@ -113,6 +113,27 @@ nkvx_close(nkvx_session *s)
 }
 
 /*
+ * nvfu_submit_poll() (and thus nvfu_kv_xfer_sgl / the Exec submit) returns the raw
+ * NVMe completion status encoded as `sc | (sct << 8)`, and ALWAYS fills *out_cpl
+ * (cdw0 included) first. A KV Retrieve/Exec whose value exceeds the host buffer
+ * completes BUFFER_TOO_SMALL — the forwarder maps SPDK_KVDEV_IO_STATUS_BUFFER_TOO_SMALL
+ * to {SCT_COMMAND_SPECIFIC, SC_CAPACITY_EXCEEDED} (target/bdev_kvrados.c) and reports
+ * the TRUE value length in cdw0 (ADR-0014 truncation). This is NOT a transport error:
+ * the caller must read cdw0 and re-issue with a right-sized buffer. Classify it so the
+ * shim surfaces the recoverable short read (return 0, *got = cdw0) instead of swallowing
+ * it as -EIO — which left the datapath.rs size-probe unable to learn the true length and
+ * so never re-reading values > RETRIEVE_HINT (bead spdk-kbh).
+ */
+#define NVFU_STATUS_BUFFER_TOO_SMALL \
+	((int)(SPDK_NVME_SC_CAPACITY_EXCEEDED | (SPDK_NVME_SCT_COMMAND_SPECIFIC << 8)))
+
+static inline bool
+nvfu_status_is_buffer_too_small(int status)
+{
+	return status == NVFU_STATUS_BUFFER_TOO_SMALL;
+}
+
+/*
  * Store via the region-bounded SGL path (nvfu_kv_xfer_sgl) instead of the
  * single-PRP nvfu_kv_store, which caps transfers at one 4096-byte page (target
  * returns status 0x6 above that). The SGL path allows up to the controller
@@ -152,12 +173,16 @@ nkvx_store(nkvx_session *s, uint32_t nsid, const char *key,
 
 /*
  * Retrieve via the region-bounded SGL path (mirrors nkvx_store). The TRUE value
- * length comes back in cpl.cdw0; the target reports it even when the host buffer
- * is too small (BUFFER_TOO_SMALL still completes with SUCCESS and the full length
- * in cdw0 -- see lib/nvmf/ctrlr_kvdev.c). We copy at most out_len bytes into the
- * caller's buffer but report the TRUE length in *got, so the caller can detect a
- * short buffer (*got > out_len) and re-read with a right-sized buffer instead of
- * silently truncating (bead spdk-jhk.7.9).
+ * length comes back in cpl.cdw0; the target reports it even when the host buffer is
+ * too small — that case completes BUFFER_TOO_SMALL ({SCT_COMMAND_SPECIFIC,
+ * SC_CAPACITY_EXCEEDED}), NOT SUCCESS, with the full length in cdw0 (ADR-0014
+ * truncation; see kvrados_kvdev_status_to_nvme in target/bdev_kvrados.c). We copy at
+ * most out_len bytes into the caller's buffer but report the TRUE length in *got and
+ * return success so the caller can detect a short buffer (*got > out_len) and re-read
+ * with a right-sized buffer instead of silently truncating (bead spdk-jhk.7.9). Any
+ * OTHER nonzero status (transport error, negative errno, or a different NVMe error) is
+ * a hard failure (-EIO). Treating BUFFER_TOO_SMALL as -EIO is what broke the > 4 MiB
+ * size-probe re-read (bead spdk-kbh).
  */
 int
 nkvx_retrieve(nkvx_session *s, uint32_t nsid, const char *key,
@@ -178,7 +203,9 @@ nkvx_retrieve(nkvx_session *s, uint32_t nsid, const char *key,
 		return -ENOMEM;
 	}
 	rc = nvfu_kv_xfer_sgl(&s->dev, nsid, SPDK_NVME_OPC_KV_RETRIEVE, key, out_len, iova, 0, 0, &cpl);
-	if (rc != 0) {
+	if (rc != 0 && !nvfu_status_is_buffer_too_small(rc)) {
+		/* Real failure (transport / unexpected NVMe error). BUFFER_TOO_SMALL falls
+		 * through: it is a recoverable short read whose cdw0 carries the true len. */
 		spdk_dma_free(buf);
 		return -EIO;
 	}
@@ -271,11 +298,14 @@ nkvx_exec(nkvx_session *s, uint32_t nsid, const char *key, uint32_t op_id,
 	if (segs != NULL) {
 		spdk_dma_free(segs);
 	}
-	if (status != 0) {
+	if (status != 0 && !nvfu_status_is_buffer_too_small(status)) {
 		fprintf(stderr, "KV Exec op %u failed: status=0x%x\n", op_id, status);
 		spdk_dma_free(buf);
 		return -EIO;
 	}
+	/* BUFFER_TOO_SMALL is a recoverable short result (cdw0 = true length): fall
+	 * through and report it in *rlen so the datapath.rs size-probe re-runs into a
+	 * right-sized buffer, exactly like nkvx_retrieve (bead spdk-kbh). */
 	spdk_rmb();
 	/* Copy only what fits, but report the TRUE length so the caller can detect
 	 * and recover from a short buffer rather than truncating silently. The result
