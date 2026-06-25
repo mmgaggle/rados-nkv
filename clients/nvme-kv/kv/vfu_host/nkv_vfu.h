@@ -567,11 +567,17 @@ nvfu_kv_exec(struct nvfu_dev *d, uint32_t nsid, const char *key, uint32_t op_id,
 	uint64_t iova;
 	uint8_t key_len = (uint8_t)strlen(key);
 	uint16_t klp = key_len;
-	uint32_t payload_len = (uint32_t)sizeof(uint16_t) + key_len + input_len;
-	uint32_t bufsz = spdk_max(out_len, 4096);
+	uint32_t head_len = (uint32_t)sizeof(uint16_t) + key_len;
+	uint32_t payload_len = head_len + input_len;
+	/* The result is scattered back into the segment AFTER the in-payload key
+	 * head (at offset head_len), so the buffer AND the mapped region must span
+	 * head_len + out_len — NOT just out_len — or a full out_len result overruns
+	 * the allocation by up to head_len bytes. Mirrors nvfu_kv_retrieve_lk. */
+	uint32_t bufsz = spdk_max(head_len + out_len, 4096);
 	/* The target maps max(vsize, osize) bytes of the single DPTR buffer (input
-	 * gathered in, result scattered back), so the SGL must describe exactly that. */
-	uint32_t xfer_len = spdk_max(payload_len, out_len);
+	 * gathered in, result scattered back at head_len), so the SGL must span
+	 * the key head + the value region. */
+	uint32_t xfer_len = spdk_max(payload_len, head_len + out_len);
 	int status, err = 0;
 
 	memset(&cmd, 0, sizeof(cmd));
@@ -616,7 +622,14 @@ nvfu_kv_exec(struct nvfu_dev *d, uint32_t nsid, const char *key, uint32_t op_id,
 	}
 	spdk_rmb();
 	*result_len = spdk_min(cpl.cdw0, out_len);
-	memcpy(out, buf, *result_len);
+	/* The exec result lands in the payload region AFTER the in-payload key head
+	 * (the forwarder's result sink is iovs[0] + value_off, value_off = head_len),
+	 * NOT at the buffer head — read it from that offset, mirroring the CPU
+	 * nkvx_shim.c::nkvx_exec fix (bead spdk-4jq). Reading from buf[0] returned the
+	 * [u16 key_len][key] head decoded as the result (e.g. bytecount = garbage u64
+	 * instead of the true object length). The buffer reserves head_len + out_len
+	 * above, so this read stays in bounds even for a full out_len result. */
+	memcpy(out, (char *)buf + head_len, *result_len);
 	spdk_dma_free(buf);
 	return 0;
 }
