@@ -76,4 +76,9 @@ int create_kvrados_disk(struct spdk_bdev **bdev, const struct kvrados_bdev_opts 
 
 void delete_kvrados_disk(const char *name, delete_kvrados_complete cb_fn, void *cb_arg);
 
+/* Replace the named kvrados bdev's KV-Exec allowlist at runtime (deep-copies the
+ * borrowed view). Returns 0, -ENODEV, -EINVAL (not a kvrados bdev), or -ENOMEM. */
+int bdev_kvrados_set_exec_allowlist(const char *name,
+				    const struct kvrados_exec_binding *allowlist, size_t count);
+
 #endif /* SPDK_BDEV_KVRADOS_H */

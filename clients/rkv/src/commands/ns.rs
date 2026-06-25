@@ -236,18 +236,20 @@ pub fn attach(cfg: &mut Config, name: &str, options: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Params for `nvmf_ns_set_kv_exec_allowlist`.
+/// Params for `bdev_kvrados_set_exec_allowlist` (out-of-tree datapath): keyed by
+/// the bdev (kvdev) name, not nqn/nsid — the forwarder is a bdev module.
 #[derive(Serialize)]
 struct SetAllowlistParams<'a> {
-    nqn: &'a str,
-    nsid: u32,
+    name: &'a str,
     allowlist: &'a [policy::AllowEntry],
 }
 
 /// `rados-nkv ns allowlist <name> -i policy.yaml`.
 ///
-/// Parses the YAML policy into allowlist entries and calls
-/// `nvmf_ns_set_kv_exec_allowlist` for the namespace's nsid.
+/// Parses the YAML policy into allowlist entries, resolves the namespace to the
+/// bdev backing it (`nvmf_get_subsystems` `bdev_name`), and calls the out-of-tree
+/// `bdev_kvrados_set_exec_allowlist` RPC. (The in-tree `nvmf_ns_set_kv_exec_allowlist`
+/// does not exist on the out-of-tree bdev_kvrados forwarder.)
 pub fn allowlist(cfg: &Config, name: &str, input: &Path) -> Result<()> {
     let nqn = require_nqn(cfg)?.to_string();
     let nsid = cfg.resolve_ns(name).with_context(|| {
@@ -263,19 +265,21 @@ pub fn allowlist(cfg: &Config, name: &str, input: &Path) -> Result<()> {
     }
 
     let client = rpc_client(cfg);
+    let bdev = client
+        .bdev_name_for_nsid(&nqn, nsid)
+        .with_context(|| format!("resolving the bdev backing '{name}' (nsid {nsid})"))?;
     let _ok: bool = client
         .call(
-            "nvmf_ns_set_kv_exec_allowlist",
+            "bdev_kvrados_set_exec_allowlist",
             SetAllowlistParams {
-                nqn: &nqn,
-                nsid,
+                name: &bdev,
                 allowlist: &entries,
             },
         )
-        .context("nvmf_ns_set_kv_exec_allowlist failed")?;
+        .context("bdev_kvrados_set_exec_allowlist failed")?;
 
     eprintln!(
-        "set {} allowlist entr{} on '{name}' (nsid {nsid})",
+        "set {} allowlist entr{} on '{name}' (nsid {nsid}, bdev {bdev})",
         entries.len(),
         if entries.len() == 1 { "y" } else { "ies" }
     );

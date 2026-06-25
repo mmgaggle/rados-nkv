@@ -117,6 +117,32 @@ impl RpcClient {
             .context("nvmf_get_subsystems failed")?;
         Ok(kv_name_map_from_subsystems(&subsystems, nqn))
     }
+
+    /// Resolve the bdev (kvdev) name backing namespace `nsid` on subsystem `nqn`,
+    /// via the standard `nvmf_get_subsystems` `bdev_name` field. The out-of-tree
+    /// `bdev_kvrados_set_exec_allowlist` RPC keys on the bdev name (there is no
+    /// in-tree per-nsid allowlist method), so `ns allowlist` resolves it here.
+    pub fn bdev_name_for_nsid(&self, nqn: &str, nsid: u32) -> Result<String> {
+        let subsystems: Vec<Value> = self
+            .call("nvmf_get_subsystems", json!({ "nqn": nqn }))
+            .context("nvmf_get_subsystems failed")?;
+        for sub in &subsystems {
+            if sub.get("nqn").and_then(Value::as_str) != Some(nqn) {
+                continue;
+            }
+            let Some(nss) = sub.get("namespaces").and_then(Value::as_array) else {
+                continue;
+            };
+            for ns in nss {
+                if ns.get("nsid").and_then(Value::as_u64) == Some(u64::from(nsid)) {
+                    if let Some(b) = ns.get("bdev_name").and_then(Value::as_str) {
+                        return Ok(b.to_string());
+                    }
+                }
+            }
+        }
+        bail!("no bdev_name for nsid {nsid} on subsystem {nqn} (is the namespace present?)")
+    }
 }
 
 /// Build the `kv_name`->nsid map from a decoded `nvmf_get_subsystems` result,

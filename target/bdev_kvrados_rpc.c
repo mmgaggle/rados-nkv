@@ -198,6 +198,84 @@ cleanup:
 SPDK_RPC_REGISTER("bdev_kvrados_create", rpc_bdev_kvrados_create, SPDK_RPC_RUNTIME)
 
 /*
+ * Set-allowlist: replace a kvrados bdev's KV-Exec allowlist at runtime. The
+ * out-of-tree analogue of the in-tree nvmf_ns_set_kv_exec_allowlist (rkv `ns
+ * allowlist` resolves a namespace to its bdev_name via nvmf_get_subsystems and
+ * calls this). Params: { name: <bdev_name>, allowlist: [ <entry>... ] }, the
+ * entries the same structured shape bdev_kvrados_create accepts.
+ */
+struct rpc_bdev_kvrados_set_allowlist_req {
+	char				*name;
+	struct rpc_nvmf_kv_exec_allowlist exec_allowlist;
+};
+
+static void
+free_rpc_bdev_kvrados_set_allowlist_req(struct rpc_bdev_kvrados_set_allowlist_req *req)
+{
+	free(req->name);
+	free_rpc_nvmf_kv_exec_allowlist(&req->exec_allowlist);
+}
+
+static const struct spdk_json_object_decoder rpc_bdev_kvrados_set_allowlist_decoders[] = {
+	{"name", offsetof(struct rpc_bdev_kvrados_set_allowlist_req, name), spdk_json_decode_string, false},
+	{"allowlist", offsetof(struct rpc_bdev_kvrados_set_allowlist_req, exec_allowlist), rpc_decode_nvmf_kv_exec_allowlist, false},
+};
+
+static void
+rpc_bdev_kvrados_set_exec_allowlist(struct spdk_jsonrpc_request *request,
+				    const struct spdk_json_val *params)
+{
+	struct rpc_bdev_kvrados_set_allowlist_req req = {};
+	struct kvrados_exec_binding *view = NULL;
+	size_t i;
+	int rc;
+
+	if (spdk_json_decode_object(params, rpc_bdev_kvrados_set_allowlist_decoders,
+				    SPDK_COUNTOF(rpc_bdev_kvrados_set_allowlist_decoders),
+				    &req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	/* Map the structured allowlist onto the borrowed kvrados_exec_binding view; the
+	 * disk deep-copies the strings (same as bdev_kvrados_create). */
+	if (req.exec_allowlist.count > 0) {
+		view = calloc(req.exec_allowlist.count, sizeof(*view));
+		if (!view) {
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							 "Out of memory");
+			goto cleanup;
+		}
+		for (i = 0; i < req.exec_allowlist.count; i++) {
+			struct rpc_nvmf_kv_exec_allow *src = &req.exec_allowlist.items[i];
+
+			view[i].op_id = src->op_id;
+			view[i].binding = src->binding;
+			view[i].runtime = src->runtime;
+			view[i].module_namespace = src->module_namespace;
+			view[i].module_key = src->module_key;
+			view[i].sha256 = src->sha256;
+			view[i].caps = src->caps;
+		}
+	}
+
+	rc = bdev_kvrados_set_exec_allowlist(req.name, view, req.exec_allowlist.count);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
+		goto cleanup;
+	}
+
+	spdk_jsonrpc_send_bool_response(request, true);
+
+cleanup:
+	free(view);			/* the view; strings are owned by req and freed below */
+	free_rpc_bdev_kvrados_set_allowlist_req(&req);
+}
+SPDK_RPC_REGISTER("bdev_kvrados_set_exec_allowlist", rpc_bdev_kvrados_set_exec_allowlist,
+		  SPDK_RPC_RUNTIME)
+
+/*
  * Delete: single 'name' param (required), hand-rolled inline decoder.
  */
 struct rpc_bdev_kvrados_delete_req {

@@ -1359,6 +1359,63 @@ kvrados_free_exec_allowlist(struct kvrados_exec_binding *allowlist, size_t count
 	free(allowlist);
 }
 
+/*
+ * Replace a kvrados bdev's KV-Exec allowlist at RUNTIME (the out-of-tree analogue
+ * of the in-tree nvmf_ns_set_kv_exec_allowlist). Looks the disk up by bdev name,
+ * deep-copies the borrowed binding view, and swaps it in (freeing the prior one).
+ * The forwarder runs a single reactor (-m 0x2), so the RPC and the IO read path
+ * (kvrados_exec_op_allowed) execute on the same thread — the swap cannot be observed
+ * torn. (A multi-reactor deployment would marshal the swap onto the bdev's thread.)
+ * On allocation failure the existing allowlist is left intact. Returns 0, -ENODEV
+ * (no such bdev), -EINVAL (not a kvrados bdev), or -ENOMEM.
+ */
+int
+bdev_kvrados_set_exec_allowlist(const char *name,
+				const struct kvrados_exec_binding *allowlist, size_t count)
+{
+	struct spdk_bdev *bdev = spdk_bdev_get_by_name(name);
+	struct kvrados_disk *kvrados;
+	struct kvrados_exec_binding *na = NULL;
+	size_t i;
+
+	if (bdev == NULL) {
+		return -ENODEV;
+	}
+	if (strcmp(spdk_bdev_get_module_name(bdev), kvrados_if.name) != 0) {
+		return -EINVAL;		/* not a kvrados bdev */
+	}
+	kvrados = SPDK_CONTAINEROF(bdev, struct kvrados_disk, disk);
+
+	if (count > 0) {
+		na = calloc(count, sizeof(*na));
+		if (na == NULL) {
+			return -ENOMEM;
+		}
+		for (i = 0; i < count; i++) {
+			const struct kvrados_exec_binding *s = &allowlist[i];
+			struct kvrados_exec_binding *d = &na[i];
+
+			d->op_id = s->op_id;
+			d->caps = s->caps;
+			if ((s->binding && !(d->binding = strdup(s->binding))) ||
+			    (s->runtime && !(d->runtime = strdup(s->runtime))) ||
+			    (s->module_namespace &&
+			     !(d->module_namespace = strdup(s->module_namespace))) ||
+			    (s->module_key && !(d->module_key = strdup(s->module_key))) ||
+			    (s->sha256 && !(d->sha256 = strdup(s->sha256)))) {
+				kvrados_free_exec_allowlist(na, i + 1);
+				return -ENOMEM;
+			}
+		}
+	}
+
+	/* Same-thread swap: no reader can observe a torn (pointer, count) pair. */
+	kvrados_free_exec_allowlist(kvrados->exec_allowlist, kvrados->exec_allowlist_count);
+	kvrados->exec_allowlist = na;
+	kvrados->exec_allowlist_count = count;
+	return 0;
+}
+
 static void
 kvrados_disk_unregister_done(void *io_device)
 {
