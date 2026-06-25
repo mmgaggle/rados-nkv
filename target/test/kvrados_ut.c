@@ -349,6 +349,82 @@ test_inpayload_key_bounds(void)
 }
 
 /*
+ * Value-region sizing + scatter (bead spdk-kbh): the rkv vfio-user client splits a
+ * value buffer into one region-bounded SGL block per 2 MiB DMA region, so the value
+ * region spans MANY iovs. kvrados_value_region_len must sum ALL value iovs (so the
+ * executor sees the true osize, not a single-region 2 MiB cap), and kvrados_scatter
+ * must reassemble a value the executor PUSHed into a contiguous bounce back across
+ * those region-bounded iovs byte-exact. Small region size here mirrors the 2 MiB
+ * structure without large allocations.
+ */
+static void
+test_value_region_len_and_scatter(void)
+{
+	enum { REGION = 8, NREG = 5 };			/* 5 region-bounded value blocks */
+	uint64_t value_off = 6;				/* a 6-byte key head precedes the value */
+	uint8_t head[6] = { 0 };
+	uint8_t blk[NREG][REGION];
+	struct iovec iovs[1 + NREG];
+	uint8_t src[NREG * REGION];
+	uint32_t total, n;
+	int i, j;
+
+	/* iov[0] = key head (its own region, before the value); iov[1..] = value blocks. */
+	iovs[0].iov_base = head;
+	iovs[0].iov_len = sizeof(head);
+	for (i = 0; i < NREG; i++) {
+		memset(blk[i], 0, REGION);
+		iovs[1 + i].iov_base = blk[i];
+		iovs[1 + i].iov_len = REGION;
+	}
+
+	/* (a) Full value-region length sums ALL value iovs, not just the first. */
+	total = kvrados_value_region_len(iovs, 1 + NREG, value_off);
+	CU_ASSERT_EQUAL(total, (uint32_t)(NREG * REGION));
+
+	/* (b) Scatter a contiguous source (the bounce the executor PUSHed into) back
+	 * across the region-bounded value iovs; every byte lands in the right block. */
+	for (i = 0; i < (int)sizeof(src); i++) {
+		src[i] = (uint8_t)(i + 1);		/* nonzero, position-encoded */
+	}
+	n = kvrados_scatter(iovs, 1 + NREG, value_off, src, total);
+	CU_ASSERT_EQUAL(n, total);
+	for (i = 0; i < NREG; i++) {
+		for (j = 0; j < REGION; j++) {
+			CU_ASSERT_EQUAL(blk[i][j], (uint8_t)(i * REGION + j + 1));
+		}
+	}
+	/* The key head must be untouched by the value scatter. */
+	for (i = 0; i < (int)sizeof(head); i++) {
+		CU_ASSERT_EQUAL(head[i], 0);
+	}
+
+	/* (c) Single contiguous region (value fits in one iov): region_len == its span,
+	 * so the handler keeps the zero-copy path (no bounce) — the <= 2 MiB case. */
+	{
+		uint8_t one[6 + 100];
+		struct iovec siov;
+
+		memset(one, 0, sizeof(one));
+		siov.iov_base = one;
+		siov.iov_len = sizeof(one);
+		total = kvrados_value_region_len(&siov, 1, value_off);
+		CU_ASSERT_EQUAL(total, 100u);
+	}
+
+	/* (d) Partial scatter: a delivered length shorter than the region capacity (a
+	 * truncated / short value) writes only that many bytes and stops cleanly. */
+	for (i = 0; i < NREG; i++) {
+		memset(blk[i], 0xEE, REGION);
+	}
+	n = kvrados_scatter(iovs, 1 + NREG, value_off, src, REGION + 3);
+	CU_ASSERT_EQUAL(n, (uint32_t)(REGION + 3));
+	CU_ASSERT_EQUAL(blk[0][0], src[0]);
+	CU_ASSERT_EQUAL(blk[1][2], src[REGION + 2]);
+	CU_ASSERT_EQUAL(blk[1][3], 0xEE);		/* untouched past the delivered span */
+}
+
+/*
  * A KV I/O verb arrives as NVME_IOV_MD with .iovs/.iovcnt set and .buf NULL; the
  * forwarder reads the iovs (never .buf). RETRIEVE with a well-formed in-payload key
  * but no executor (the --without-mercury UT build) completes a clean device error,
@@ -1027,6 +1103,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_inpayload_key_short);
 	CU_ADD_TEST(suite, test_inpayload_key_long_multi_iov);
 	CU_ADD_TEST(suite, test_inpayload_key_bounds);
+	CU_ADD_TEST(suite, test_value_region_len_and_scatter);
 	CU_ADD_TEST(suite, test_kv_retrieve_no_executor);
 	CU_ADD_TEST(suite, test_kv_retrieve_bad_key);
 	CU_ADD_TEST(suite, test_kv_io_bad_opcode);
