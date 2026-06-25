@@ -89,6 +89,13 @@ enum Command {
         options: Vec<String>,
     },
 
+    /// Probe whether ns/key is present; prints present+length (exit 0) or
+    /// absent (non-zero exit). Carries no value body.
+    Exist {
+        /// Path 'ns/key' (ns resolved to nsid via ~/.rados-nkv.conf).
+        path: String,
+    },
+
     /// List configured namespaces, or report that per-ns key listing is
     /// unsupported by the target.
     #[command(visible_alias = "ls")]
@@ -438,6 +445,27 @@ fn cmd_get(cfg: &Config, paths: &[String], options: &[String], use_gpu: bool) ->
     Ok(())
 }
 
+/// KV Exist probe for `ns/key`. Prints a one-line human result and returns
+/// `true` when the key is present (length surfaced from the completion's cdw0),
+/// `false` when absent. The caller maps `false` to a non-zero exit. Exist carries
+/// no value body, so it is unaffected by the controller->host DMA path and does
+/// not route through the GPU datapath (a presence probe has no value to scatter).
+fn cmd_exist(cfg: &Config, path: &str) -> Result<bool> {
+    let (ns, key) = KvPath::parse_with_key(path)?;
+    let nsid = resolve_ns(cfg, &ns)?;
+    let sess = Session::open(cfg.traddr())?;
+    match sess.exist(nsid, &key)? {
+        Some(len) => {
+            println!("present {ns}/{key} (nsid={nsid}, {len} bytes)");
+            Ok(true)
+        }
+        None => {
+            println!("absent {ns}/{key} (nsid={nsid})");
+            Ok(false)
+        }
+    }
+}
+
 /// Resolve an exec op-name to its op_id, with a helpful error listing the known
 /// names on miss. Never hardcodes an op_id — the mapping is config-driven.
 fn resolve_exec(cfg: &Config, name: &str) -> Result<u32> {
@@ -524,10 +552,20 @@ fn selftest(traddr: &str, key: &str, value: &str) -> Result<bool> {
     Ok(got == val)
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     let use_gpu = cli.gpu;
-    match cli.command {
+    // `exist` is the one command whose exit code encodes a query result (present
+    // vs absent), not just success vs error, so it returns its own ExitCode. Every
+    // other command maps Ok -> SUCCESS; a returned Err becomes FAILURE in main.
+    if let Command::Exist { path } = &cli.command {
+        let cfg = Config::load()?;
+        return Ok(match cmd_exist(&cfg, path)? {
+            true => ExitCode::SUCCESS,
+            false => ExitCode::FAILURE,
+        });
+    }
+    let res: Result<()> = match cli.command {
         Command::Store { path, input, options } => {
             let cfg = Config::load()?;
             cmd_store(&cfg, &path, input.as_deref(), &options, use_gpu)
@@ -536,6 +574,7 @@ fn run() -> Result<()> {
             let cfg = Config::load()?;
             cmd_get(&cfg, &paths, &options, use_gpu)
         }
+        Command::Exist { .. } => unreachable!("handled above"),
         Command::List { ns } => {
             let cfg = Config::load()?;
             commands::list::run(&cfg, ns.as_deref())
@@ -577,12 +616,13 @@ fn run() -> Result<()> {
             }
             false => bail!("selftest mismatch (retrieved bytes != stored)"),
         },
-    }
+    };
+    res.map(|()| ExitCode::SUCCESS)
 }
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e:#}");
             ExitCode::FAILURE

@@ -224,6 +224,98 @@ nkvx_retrieve(nkvx_session *s, uint32_t nsid, const char *key,
 }
 
 /*
+ * KV Exist (opcode 0x14): presence probe carrying NO value body. EXIST is a
+ * NO-DATA opcode (0x14 & 3 == 0 -> SPDK_NVME_DATA_NONE), so nvmf/vfio-user maps
+ * NO DPTR for it (lib/nvmf/vfio_user.c map_io_cmd_req returns early on
+ * DATA_NONE). The in-payload [u16 key_len][key] head that Store/Retrieve/Exec use
+ * therefore can never reach the target for EXIST -- it would arrive as key_len==0
+ * and the forwarder would reject it INVALID_FIELD (bead spdk-qzm root cause).
+ *
+ * So we frame the key INLINE in the command CDW slots (CDW2/3 = key[0..7],
+ * CDW14/15 = key[8..15], length in CDW11.KL) -- the canonical short-key framing
+ * (mirrors lib/nvme nvme_kv_cmd_set_key); the matching forwarder read is
+ * kvrados_read_cdw_key in target/bdev_kvrados.c. The CDWs are always present
+ * regardless of data direction, so no DPTR/SGL/DMA buffer is needed. This caps
+ * the EXIST key at the inline 16-byte spec max (SPDK_NVME_KV_KEY_MAX_LEN); a
+ * longer key is rejected here rather than silently truncated.
+ *
+ * Completion status decides presence: nvfu_submit_poll returns sc | (sct << 8).
+ *   - 0x000 (SUCCESS, generic)                         -> present, *present=1
+ *   - 0x187 (KV Key Does Not Exist, command-specific)  -> absent,  *present=0
+ *   - anything else / negative                         -> transport/target error
+ * On a present key cpl.cdw0 carries the FULL stored value length (CQE DW0,
+ * ADR-0014 truncation semantics -- see kvrados_retrieve_done), surfaced in *len.
+ * Returns 0 on a definitive present/absent answer (status surfaced via *present),
+ * negative errno on a setup/transport error or an out-of-range key.
+ */
+int
+nkvx_exist(nkvx_session *s, uint32_t nsid, const char *key,
+	   int *present, uint32_t *len)
+{
+	struct nvfu_dev *d;
+	struct spdk_nvme_cmd cmd;
+	struct spdk_nvme_cpl cpl;
+	size_t key_len;
+	int status;
+
+	if (s == NULL || key == NULL) {
+		return -EINVAL;
+	}
+	d = &s->dev;
+	key_len = strlen(key);
+	/* EXIST has no DPTR to carry a long key; the inline CDW slots hold <= 16 B. */
+	if (key_len < SPDK_NVME_KV_KEY_MIN_LEN || key_len > SPDK_NVME_KV_KEY_MAX_LEN) {
+		fprintf(stderr,
+			"KV Exist: key length %zu out of inline range [%d,%d]; EXIST keys "
+			"ride the command CDW slots (no DPTR), so they cap at %d bytes\n",
+			key_len, SPDK_NVME_KV_KEY_MIN_LEN, SPDK_NVME_KV_KEY_MAX_LEN,
+			SPDK_NVME_KV_KEY_MAX_LEN);
+		return -EINVAL;
+	}
+
+	memset(&cmd, 0, sizeof(cmd));
+	memset(&cpl, 0, sizeof(cpl));
+
+	cmd.opc = SPDK_NVME_OPC_KV_EXIST;
+	cmd.nsid = nsid;
+	cmd.cdw10_bits.kv.vsize = 0;		/* no value transfer */
+	cmd.cdw11_bits.kv.kl = (uint8_t)key_len;	/* inline key length */
+	/* Inline key: bytes 0..7 in CDW2/CDW3, bytes 8..15 in CDW14/CDW15. */
+	memcpy(&cmd.cdw2, key, spdk_min(key_len, (size_t)8));
+	if (key_len > 8) {
+		memcpy(&cmd.cdw14, key + 8, key_len - 8);
+	}
+
+	/* No DPTR: EXIST transfers no data, so submit the bare command. */
+	status = nvfu_submit_poll(d, &d->io, &cmd, &cpl);
+	if (status < 0) {
+		return status;	/* transport/setup error (timeout, etc.) */
+	}
+	if (status == 0) {
+		if (present != NULL) {
+			*present = 1;
+		}
+		if (len != NULL) {
+			*len = cpl.cdw0;
+		}
+		return 0;
+	}
+	if (status == ((SPDK_NVME_SCT_COMMAND_SPECIFIC << 8) |
+		       SPDK_NVME_SC_KV_KEY_DOES_NOT_EXIST)) {
+		if (present != NULL) {
+			*present = 0;
+		}
+		if (len != NULL) {
+			*len = 0;
+		}
+		return 0;
+	}
+	/* Any other NVMe status is an unexpected error, not a clean present/absent. */
+	fprintf(stderr, "KV Exist nsid=%u failed: status=0x%x\n", nsid, status);
+	return -EIO;
+}
+
+/*
  * KV Exec mirroring nkvx_retrieve's short-buffer contract (bead spdk-jhk.7.10).
  *
  * nvfu_kv_exec() (nkv_vfu.h) clamps its result_len to out_len, which the GPU/CPU

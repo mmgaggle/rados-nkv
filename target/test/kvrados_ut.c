@@ -348,6 +348,63 @@ test_inpayload_key_bounds(void)
 	CU_ASSERT_EQUAL(klen, 0);
 }
 
+/* Stage an inline key into the command CDW slots EXACTLY as the host's
+ * nvme_kv_cmd_set_key does (bytes 0..7 -> CDW2/CDW3, 8..15 -> CDW14/CDW15, length
+ * -> CDW11.KL). This mirrors the rkv shim's nkvx_exist framing so the test proves
+ * the host-side write and the forwarder-side read agree byte-for-byte. */
+static void
+ut_stage_cdw_key(struct spdk_nvme_cmd *cmd, const char *key, uint8_t key_len)
+{
+	memset(cmd, 0, sizeof(*cmd));
+	cmd->cdw11_bits.kv.kl = key_len;
+	memcpy((uint8_t *)&cmd->cdw2, key, spdk_min(key_len, (uint8_t)8));
+	if (key_len > 8) {
+		memcpy((uint8_t *)&cmd->cdw14, key + 8, spdk_min((uint8_t)(key_len - 8), (uint8_t)8));
+	}
+}
+
+/*
+ * Inline CDW key (the NO-DATA Exist/Delete path, bead spdk-qzm): the key rides the
+ * command CDW slots (no DPTR is mapped for a DATA_NONE opcode), so the forwarder
+ * reads it back from CDW2/3/14/15 + CDW11.KL. Verify a short key, a full 16-byte
+ * key spanning all four CDWs byte-exactly, and the inline 1..16 length bounds.
+ */
+static void
+test_cdw_key(void)
+{
+	struct spdk_nvme_cmd cmd;
+	uint8_t key[KVRADOS_KEY_MAX_LEN];
+	uint16_t klen;
+	const char *k16 = "0123456789abcdef";	/* exactly 16 bytes: spans CDW2/3/14/15 */
+
+	/* Short key (<= 8 bytes: lives wholly in CDW2/CDW3). */
+	ut_stage_cdw_key(&cmd, "ABCD", 4);
+	klen = kvrados_read_cdw_key(&cmd, key);
+	CU_ASSERT_EQUAL(klen, 4);
+	CU_ASSERT(memcmp(key, "ABCD", 4) == 0);
+
+	/* 9-byte key: one byte spills into CDW14. */
+	ut_stage_cdw_key(&cmd, "ABCDEFGHI", 9);
+	klen = kvrados_read_cdw_key(&cmd, key);
+	CU_ASSERT_EQUAL(klen, 9);
+	CU_ASSERT(memcmp(key, "ABCDEFGHI", 9) == 0);
+
+	/* Full 16-byte inline key: CDW2/3 hold 0..7, CDW14/15 hold 8..15. */
+	ut_stage_cdw_key(&cmd, k16, 16);
+	klen = kvrados_read_cdw_key(&cmd, key);
+	CU_ASSERT_EQUAL(klen, 16);
+	CU_ASSERT(memcmp(key, k16, 16) == 0);
+
+	/* kl == 0 (no key) -> rejected. */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.cdw11_bits.kv.kl = 0;
+	CU_ASSERT_EQUAL(kvrados_read_cdw_key(&cmd, key), 0);
+
+	/* kl == 17 (> inline 16-byte max) -> rejected. */
+	cmd.cdw11_bits.kv.kl = 17;
+	CU_ASSERT_EQUAL(kvrados_read_cdw_key(&cmd, key), 0);
+}
+
 /*
  * Value-region sizing + scatter (bead spdk-kbh): the rkv vfio-user client splits a
  * value buffer into one region-bounded SGL block per 2 MiB DMA region, so the value
@@ -1104,6 +1161,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_inpayload_key_long_multi_iov);
 	CU_ADD_TEST(suite, test_inpayload_key_bounds);
 	CU_ADD_TEST(suite, test_value_region_len_and_scatter);
+	CU_ADD_TEST(suite, test_cdw_key);
 	CU_ADD_TEST(suite, test_kv_retrieve_no_executor);
 	CU_ADD_TEST(suite, test_kv_retrieve_bad_key);
 	CU_ADD_TEST(suite, test_kv_io_bad_opcode);

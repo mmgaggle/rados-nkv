@@ -10,6 +10,7 @@
 #include "spdk/likely.h"
 #include "spdk/string.h"
 #include "spdk/nvme_spec.h"
+#include "spdk/nvme_kv.h"		/* SPDK_NVME_KV_KEY_MIN_LEN/MAX_LEN (inline CDW key) */
 #include "spdk/bdev_module.h"
 #include "spdk/util.h"
 #include "spdk/log.h"
@@ -276,6 +277,41 @@ kvrados_parse_inpayload_key(const struct iovec *iovs, int iovcnt, uint64_t paylo
 	}
 	if (value_off != NULL) {
 		*value_off = (uint64_t)KVRADOS_KEY_HDR_LEN + key_len;
+	}
+	return key_len;
+}
+
+/*
+ * Read an INLINE key from the command CDW slots (NVMe KV Command Set §: key bytes
+ * 0..7 in CDW2/CDW3, bytes 8..15 in CDW14/CDW15, length in CDW11.KL). This is the
+ * canonical short-key framing (mirrors lib/nvme nvme_kv_cmd_set_key) and is used
+ * by the NO-DATA verbs Exist (0x14) and Delete (0x10): their opcode data-transfer
+ * bits are 0 (opc & 3 == 0 -> SPDK_NVME_DATA_NONE), so nvmf/vfio-user never maps a
+ * DPTR for them (lib/nvmf/vfio_user.c map_io_cmd_req short-circuits on DATA_NONE).
+ * The in-payload [u16 key_len][key] head used by Store/Retrieve/Exec therefore can
+ * never arrive for Exist/Delete, so the key must ride inline in the always-present
+ * command CDWs instead (bead spdk-qzm). Returns the key length (1..16) and fills
+ * key[] (caller-sized to >= 16), or 0 if CDW11.KL is out of the inline 1..16 range.
+ */
+static uint16_t
+kvrados_read_cdw_key(const struct spdk_nvme_cmd *cmd, uint8_t key[KVRADOS_KEY_MAX_LEN])
+{
+	uint8_t key_len = (uint8_t)cmd->cdw11_bits.kv.kl;
+	uint32_t lo[2];
+
+	if (key_len < SPDK_NVME_KV_KEY_MIN_LEN || key_len > SPDK_NVME_KV_KEY_MAX_LEN) {
+		return 0;
+	}
+	/* Bytes 0..7 from CDW2/CDW3 (little-endian on the wire, copied verbatim). */
+	lo[0] = cmd->cdw2;
+	lo[1] = cmd->cdw3;
+	memcpy(key, lo, spdk_min(key_len, 8u));
+	if (key_len > 8) {
+		uint32_t hi[2];
+
+		hi[0] = cmd->cdw14;
+		hi[1] = cmd->cdw15;
+		memcpy(key + 8, hi, spdk_min((uint32_t)key_len - 8u, 8u));
 	}
 	return key_len;
 }
@@ -1149,6 +1185,17 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 	}
 	case SPDK_NVME_OPC_KV_DELETE:
 	case SPDK_NVME_OPC_KV_EXIST: {
+		/*
+		 * Exist/Delete are NO-DATA opcodes (opc & 3 == 0), so nvmf/vfio-user maps
+		 * no DPTR and the in-payload [u16 key_len][key] head never arrives — the
+		 * parse above yields key_len==0. Recover the key from the INLINE CDW slots
+		 * (the canonical short-key framing the host uses for these verbs). A
+		 * present in-payload key (e.g. a future transport that does map the DPTR)
+		 * still wins; only fall back to the CDW key when it is absent.
+		 */
+		if (key_len == 0) {
+			key_len = kvrados_read_cdw_key(cmd, key);
+		}
 		if (key_len == 0) {
 			spdk_bdev_io_complete_nvme_status(bdev_io, 0,
 							  SPDK_NVME_SCT_GENERIC,

@@ -201,6 +201,34 @@ impl Session {
         Ok(true_len)
     }
 
+    /// KV Exist probe for `key` in `nsid` (bead spdk-qzm, used by the `exist`
+    /// command). Returns `Some(len)` with the stored value's full length when the
+    /// key is present, or `None` when it is absent. Carries no value body, so it
+    /// is unaffected by the controller->host DMA path.
+    pub fn exist(&self, nsid: u32, key: &str) -> Result<Option<u64>> {
+        let k = CString::new(key).context("key contains NUL")?;
+        let mut present: i32 = 0;
+        let mut len: u32 = 0;
+        // SAFETY: handle valid; k outlives the call; out pointers are valid.
+        let rc = unsafe {
+            ffi::nkvx_exist(
+                self.raw,
+                nsid,
+                k.as_ptr(),
+                &mut present as *mut i32,
+                &mut len as *mut u32,
+            )
+        };
+        if rc != 0 {
+            return Err(anyhow!("nkvx_exist(nsid={nsid}, key={key}) failed: rc={rc}"));
+        }
+        if present != 0 {
+            Ok(Some(u64::from(len)))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// KV Exec `op_id` against `key` in `nsid` with optional `input`, returning
     /// the FULL result bytes (bead spdk-jhk.7.3, used by the `exec` command).
     ///
