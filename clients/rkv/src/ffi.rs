@@ -61,4 +61,14 @@ extern "C" {
         out_len: u32,
         rlen: *mut u32,
     ) -> c_int;
+
+    pub fn nkvx_exist(
+        s: *mut NkvxSession,
+        nsid: u32,
+        key: *const c_char,
+        // out: 1 if the key is present, 0 if absent.
+        present: *mut c_int,
+        // out: the stored value's full length (cpl.cdw0) when present, else 0.
+        len: *mut u32,
+    ) -> c_int;
 }

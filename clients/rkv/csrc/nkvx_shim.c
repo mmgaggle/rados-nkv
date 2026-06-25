@@ -197,6 +197,102 @@ nkvx_retrieve(nkvx_session *s, uint32_t nsid, const char *key,
 }
 
 /*
+ * KV Exist (long-key, opcode 0x14): presence probe carrying NO value body, so it
+ * is unaffected by the controller->host DMA path (bead spdk-qzm). The request
+ * rides [u16 key_len][key] at the DPTR head exactly like Delete (see
+ * nvfu_kv_op_lk in nkv_vfu.h), host->device only. We do NOT call nvfu_kv_op_lk
+ * here because it discards the completion: this verb needs cpl.cdw0, which the
+ * target sets to the FULL stored value length on a present key (CQE DW0, ADR-0014
+ * truncation semantics -- see kvrados_retrieve_done in target/bdev_kvrados.c), so
+ * the CLI can report the stored length without a Retrieve.
+ *
+ * Completion status decides presence: nvfu_submit_poll returns sc | (sct << 8).
+ *   - 0x000 (SUCCESS, generic)                         -> present, *present=1
+ *   - 0x187 (KV Key Does Not Exist, command-specific)  -> absent,  *present=0
+ *   - anything else / negative                         -> transport/target error
+ * Returns 0 on a definitive present/absent answer (status surfaced via *present),
+ * negative errno on a setup/transport error.
+ */
+int
+nkvx_exist(nkvx_session *s, uint32_t nsid, const char *key,
+	   int *present, uint32_t *len)
+{
+	struct nvfu_dev *d;
+	struct spdk_nvme_cmd cmd;
+	struct spdk_nvme_cpl cpl;
+	struct spdk_nvme_sgl_descriptor *segs;
+	void *buf;
+	uint64_t iova;
+	uint8_t key_len;
+	uint16_t klp;
+	uint32_t head_len, bufsz;
+	int status, err = 0;
+
+	if (s == NULL || key == NULL) {
+		return -EINVAL;
+	}
+	d = &s->dev;
+	key_len = (uint8_t)strlen(key);
+	klp = key_len;
+	head_len = (uint32_t)sizeof(uint16_t) + key_len;
+	bufsz = spdk_max(head_len, 4096);
+
+	memset(&cmd, 0, sizeof(cmd));
+	memset(&cpl, 0, sizeof(cpl));
+	buf = nvfu_dma_alloc(bufsz, &iova);
+	if (buf == NULL) {
+		return -ENOMEM;
+	}
+	/* Stage [u16 key_len][key] at the buffer head (host->device, no value). */
+	memcpy(buf, &klp, sizeof(klp));
+	memcpy((char *)buf + sizeof(klp), key, key_len);
+	spdk_wmb();
+
+	cmd.opc = SPDK_NVME_OPC_KV_EXIST;
+	cmd.nsid = nsid;
+	cmd.cdw11_bits.kv.kl = 0;	/* long-key signal: real length is the u16 prefix */
+	cmd.cdw10_bits.kv.vsize = 0;	/* no value transfer */
+
+	/* The target gathers head_len bytes (the key prefix) on the way in. */
+	segs = nvfu_sgl_set_dptr(&cmd, iova, head_len, &err);
+	if (err != 0) {
+		spdk_dma_free(buf);
+		return err;
+	}
+
+	status = nvfu_submit_poll(d, &d->io, &cmd, &cpl);
+	if (segs != NULL) {
+		spdk_dma_free(segs);
+	}
+	spdk_dma_free(buf);
+	if (status < 0) {
+		return status;	/* transport/setup error (timeout, etc.) */
+	}
+	if (status == 0) {
+		if (present != NULL) {
+			*present = 1;
+		}
+		if (len != NULL) {
+			*len = cpl.cdw0;
+		}
+		return 0;
+	}
+	if (status == ((SPDK_NVME_SCT_COMMAND_SPECIFIC << 8) |
+		       SPDK_NVME_SC_KV_KEY_DOES_NOT_EXIST)) {
+		if (present != NULL) {
+			*present = 0;
+		}
+		if (len != NULL) {
+			*len = 0;
+		}
+		return 0;
+	}
+	/* Any other NVMe status is an unexpected error, not a clean present/absent. */
+	fprintf(stderr, "KV Exist nsid=%u failed: status=0x%x\n", nsid, status);
+	return -EIO;
+}
+
+/*
  * KV Exec mirroring nkvx_retrieve's short-buffer contract (bead spdk-jhk.7.10).
  *
  * nvfu_kv_exec() (nkv_vfu.h) clamps its result_len to out_len, which the GPU/CPU

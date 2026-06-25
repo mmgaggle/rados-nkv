@@ -37,6 +37,13 @@ int nkvx_exec(nkvx_session *s, uint32_t nsid, const char *key, uint32_t op_id,
 	      const void *in, uint32_t in_len,
 	      void *out, uint32_t out_len, uint32_t *rlen);
 
+/* KV Exist presence probe: no value body, so unaffected by the device->host DMA
+ * path. On a definitive answer returns 0 and sets *present (1 present / 0 absent)
+ * and, when present, *len to the FULL stored value length (cpl.cdw0). Returns a
+ * negative errno on a transport/setup error or an unexpected NVMe status. */
+int nkvx_exist(nkvx_session *s, uint32_t nsid, const char *key,
+	       int *present, uint32_t *len);
+
 #ifdef __cplusplus
 }
 #endif
