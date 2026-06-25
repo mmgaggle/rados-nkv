@@ -772,6 +772,8 @@ struct nkvx_kv_req {
 	nkvx_kv_in_t		in;
 	struct nkvx_exec_result	res;		/* delivered bytes from the backend */
 	nkvx_kv_out_t		out;		/* response envelope (borrows res.buf) */
+	void			*value_buf;	/* pulled large STORE value, if any */
+	hg_bulk_t		local_value;	/* local WRITE handle for the value PULL */
 	hg_bulk_t		local_result;	/* local READ handle for the PUSH */
 };
 
@@ -789,7 +791,18 @@ nkvx_kv_req_finish(struct nkvx_kv_req *req)
 	if (req->local_result != HG_BULK_NULL) {
 		HG_Bulk_free(req->local_result);
 	}
+	if (req->local_value != HG_BULK_NULL) {
+		HG_Bulk_free(req->local_value);
+	}
 	nkvx_exec_result_free(&req->res);
+	if (req->value_buf != NULL) {
+		/* The large-value PULL repointed in.value_inline at our pulled buffer;
+		 * detach it so HG_Free_input frees only Mercury-owned memory, then we free
+		 * value_buf ourselves below. On the inline path value_buf is NULL and
+		 * in.value_inline is the proc-decoded buffer HG_Free_input must free. */
+		req->in.value_inline = NULL;
+	}
+	free(req->value_buf);	/* free(NULL) is fine on the inline path */
 	HG_Free_input(req->handle, &req->in);
 	HG_Destroy(req->handle);
 	free(req);
@@ -826,6 +839,127 @@ nkvx_kv_result_pushed_cb(const struct hg_cb_info *info)
 	return HG_SUCCESS;
 }
 
+/*
+ * Run the verb against the backend and deliver the response. The STORE value (large
+ * → pulled into req->in.value_inline by the value PULL; small → rode inline) and all
+ * other inputs are in place by now. Retrieve/List large values are PUSHed into the
+ * front's result_sink and the response is sent only from the PUSH-completion cb
+ * (NORMATIVE); everything else responds inline here. Shared by the inline entry and
+ * the post-value-PULL continuation.
+ */
+static void
+nkvx_kv_run_and_deliver(struct nkvx_kv_req *req)
+{
+	hg_return_t ret;
+
+	nkvx_executor_kv(g_executor, &req->in, &req->res);
+	fprintf(stderr,
+		"nkvx_service: nkvx_kv verb=%u key_len=%u osize=%u -> status=%d "
+		"result_len=%u deliver=%u%s\n",
+		req->in.verb, req->in.key_len, req->in.osize, req->res.status,
+		req->res.result_len, req->res.buf_len,
+		(req->in.result_sink != HG_BULK_NULL) ? " sink" : "");
+
+	/* Large value + a sink to push into: front-sink/executor-push (design §1.3). */
+	if (req->in.result_sink != HG_BULK_NULL && req->res.buf_len > NKVX_INLINE_MAX) {
+		hg_class_t *cls = HG_Get_info(req->handle)->hg_class;
+		void *p = req->res.buf;
+		hg_size_t sz = req->res.buf_len;
+
+		ret = HG_Bulk_create(cls, 1, &p, &sz, HG_BULK_READ_ONLY, &req->local_result);
+		if (ret != HG_SUCCESS) {
+			fprintf(stderr, "nkvx_service: kv HG_Bulk_create(result) failed: %s\n",
+				HG_Error_to_string(ret));
+			nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_FAILED);
+			return;
+		}
+		ret = HG_Bulk_transfer(req->ctx, nkvx_kv_result_pushed_cb, req,
+				       HG_BULK_PUSH, req->origin, req->in.result_sink, 0,
+				       req->local_result, 0, sz, HG_OP_ID_IGNORE);
+		if (ret != HG_SUCCESS) {
+			fprintf(stderr, "nkvx_service: kv HG_Bulk_transfer(PUSH) failed: %s\n",
+				HG_Error_to_string(ret));
+			nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_FAILED);
+			return;
+		}
+		return;	/* respond from nkvx_kv_result_pushed_cb (NORMATIVE) */
+	}
+
+	/* Inline path. A large value with no sink offered cannot be delivered (mirrors
+	 * the Exec guard); decline cleanly. */
+	if (req->res.buf_len > NKVX_INLINE_MAX) {
+		fprintf(stderr, "nkvx_service: kv value %u > inline max %u and no result_sink "
+			"— NOT_SUPPORTED\n", req->res.buf_len, NKVX_INLINE_MAX);
+		nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_NOT_SUPPORTED);
+		return;
+	}
+	req->out.status = nkvx_status_to_wire(req->res.status);
+	req->out.result_len = req->res.result_len;		/* TRUE length -> CQE DW0 */
+	req->out.result_inline = req->res.buf;			/* borrowed; freed via res */
+	req->out.result_inline_len = req->res.buf_len;
+	nkvx_kv_req_finish(req);
+}
+
+/*
+ * Large-STORE-value PULL completion: the value has been read into value_buf. Point the
+ * backend store at it (via value_inline) and run the verb. Mirrors nkvx_input_pulled_cb.
+ */
+static hg_return_t
+nkvx_kv_value_pulled_cb(const struct hg_cb_info *info)
+{
+	struct nkvx_kv_req *req = info->arg;
+
+	if (info->ret != HG_SUCCESS) {
+		fprintf(stderr, "nkvx_service: kv value PULL failed: %s\n",
+			HG_Error_to_string(info->ret));
+		nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_FAILED);
+		return HG_SUCCESS;
+	}
+	req->in.value_inline = req->value_buf;	/* backend store reads value_inline */
+	nkvx_kv_run_and_deliver(req);
+	return HG_SUCCESS;
+}
+
+/*
+ * Submit the large-STORE-value PULL from the front's READ-registered value_bulk (the
+ * input-PULL analogue of the Exec input PULL, nkvx_submit_input_pull). Continues from
+ * nkvx_kv_value_pulled_cb. The base-verb path has no Slice C6b cancel handshake (S3),
+ * so the PULL op id is ignored (like the KV result PUSH). Terminates the request and
+ * returns -1 on a synchronous failure, else 0.
+ */
+static int
+nkvx_kv_submit_value_pull(struct nkvx_kv_req *req)
+{
+	hg_class_t *cls = HG_Get_info(req->handle)->hg_class;
+	hg_size_t sz = req->in.value_len;
+	void *p;
+	hg_return_t ret;
+
+	req->value_buf = malloc(req->in.value_len);
+	if (req->value_buf == NULL) {
+		nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_NOMEM);
+		return -1;
+	}
+	p = req->value_buf;
+	ret = HG_Bulk_create(cls, 1, &p, &sz, HG_BULK_WRITE_ONLY, &req->local_value);
+	if (ret != HG_SUCCESS) {
+		fprintf(stderr, "nkvx_service: kv HG_Bulk_create(value) failed: %s\n",
+			HG_Error_to_string(ret));
+		nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_FAILED);
+		return -1;
+	}
+	ret = HG_Bulk_transfer(req->ctx, nkvx_kv_value_pulled_cb, req,
+			       HG_BULK_PULL, req->origin, req->in.value_bulk, 0,
+			       req->local_value, 0, sz, HG_OP_ID_IGNORE);
+	if (ret != HG_SUCCESS) {
+		fprintf(stderr, "nkvx_service: kv HG_Bulk_transfer(PULL) failed: %s\n",
+			HG_Error_to_string(ret));
+		nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_FAILED);
+		return -1;
+	}
+	return 0;	/* continue from nkvx_kv_value_pulled_cb */
+}
+
 static hg_return_t
 nkvx_kv_handler(hg_handle_t handle)
 {
@@ -841,6 +975,7 @@ nkvx_kv_handler(hg_handle_t handle)
 	}
 	req->handle = handle;
 	req->local_result = HG_BULK_NULL;
+	req->local_value = HG_BULK_NULL;
 
 	ret = HG_Get_input(handle, &req->in);
 	if (ret != HG_SUCCESS) {
@@ -864,52 +999,18 @@ nkvx_kv_handler(hg_handle_t handle)
 		return HG_SUCCESS;
 	}
 
-	nkvx_executor_kv(g_executor, &req->in, &req->res);
-	fprintf(stderr,
-		"nkvx_service: nkvx_kv verb=%u key_len=%u osize=%u -> status=%d "
-		"result_len=%u deliver=%u%s\n",
-		req->in.verb, req->in.key_len, req->in.osize, req->res.status,
-		req->res.result_len, req->res.buf_len,
-		(req->in.result_sink != HG_BULK_NULL) ? " sink" : "");
-
-	/* Large value + a sink to push into: front-sink/executor-push (design §1.3). */
-	if (req->in.result_sink != HG_BULK_NULL && req->res.buf_len > NKVX_INLINE_MAX) {
-		hg_class_t *cls = HG_Get_info(req->handle)->hg_class;
-		void *p = req->res.buf;
-		hg_size_t sz = req->res.buf_len;
-
-		ret = HG_Bulk_create(cls, 1, &p, &sz, HG_BULK_READ_ONLY, &req->local_result);
-		if (ret != HG_SUCCESS) {
-			fprintf(stderr, "nkvx_service: kv HG_Bulk_create(result) failed: %s\n",
-				HG_Error_to_string(ret));
-			nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_FAILED);
-			return HG_SUCCESS;
-		}
-		ret = HG_Bulk_transfer(req->ctx, nkvx_kv_result_pushed_cb, req,
-				       HG_BULK_PUSH, req->origin, req->in.result_sink, 0,
-				       req->local_result, 0, sz, HG_OP_ID_IGNORE);
-		if (ret != HG_SUCCESS) {
-			fprintf(stderr, "nkvx_service: kv HG_Bulk_transfer(PUSH) failed: %s\n",
-				HG_Error_to_string(ret));
-			nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_FAILED);
-			return HG_SUCCESS;
-		}
-		return HG_SUCCESS;	/* respond from nkvx_kv_result_pushed_cb (NORMATIVE) */
-	}
-
-	/* Inline path. A large value with no sink offered cannot be delivered (mirrors
-	 * the Exec guard); decline cleanly. */
-	if (req->res.buf_len > NKVX_INLINE_MAX) {
-		fprintf(stderr, "nkvx_service: kv value %u > inline max %u and no result_sink "
-			"— NOT_SUPPORTED\n", req->res.buf_len, NKVX_INLINE_MAX);
-		nkvx_kv_req_fail(req, SPDK_KVDEV_IO_STATUS_NOT_SUPPORTED);
+	/*
+	 * A large STORE value is delivered out-of-band: PULL it from the front's READ-
+	 * registered value_bulk into a local buffer BEFORE running the store (mirrors the
+	 * Exec large-input PULL). A small value rode inline in value_inline. The PULL
+	 * continues at nkvx_kv_value_pulled_cb, which then runs nkvx_kv_run_and_deliver.
+	 */
+	if (req->in.value_bulk != HG_BULK_NULL && req->in.value_len > NKVX_INLINE_MAX) {
+		nkvx_kv_submit_value_pull(req);	/* continues from nkvx_kv_value_pulled_cb */
 		return HG_SUCCESS;
 	}
-	req->out.status = nkvx_status_to_wire(req->res.status);
-	req->out.result_len = req->res.result_len;		/* TRUE length -> CQE DW0 */
-	req->out.result_inline = req->res.buf;			/* borrowed; freed via res */
-	req->out.result_inline_len = req->res.buf_len;
-	nkvx_kv_req_finish(req);
+
+	nkvx_kv_run_and_deliver(req);
 	return HG_SUCCESS;
 }
 

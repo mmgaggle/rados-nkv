@@ -345,11 +345,12 @@ kvdev_rados_nkvx_front_store(struct nkvx_front *front,
 	in.key_len = key_len;
 	memcpy(in.key, key, key_len);
 	in.value_len = value_len;
-	/* Inline value: the executor reads value_inline directly. Large-value PULL
-	 * (value_bulk) is a later slice; nkvx_front_kv_forward drops value_bulk and the
-	 * executor declines NOT_SUPPORTED when value_len > inline and value_inline NULL. */
+	/* value points at the value region (zero-copy SGL span or a bounce that outlives
+	 * the RPC). A small value (<= NKVX_INLINE_MAX) rides inline; for a large value
+	 * nkvx_front_kv_forward registers this region READ-mode as value_bulk and the
+	 * executor RDMA-PULLs it. Either way the caller keeps value valid until the cb. */
 	in.value_inline = (value_len > 0) ? (void *)value : NULL;
-	in.value_bulk = HG_BULK_NULL;
+	in.value_bulk = HG_BULK_NULL;		/* originated by the forward */
 	in.result_sink = HG_BULK_NULL;
 
 	/* No result sink (Store returns only status). */

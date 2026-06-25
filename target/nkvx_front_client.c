@@ -863,6 +863,7 @@ struct nkvx_kv_call {
 	nkvx_front_done_cb	cb;
 	void			*arg;
 	hg_handle_t		handle;
+	hg_bulk_t		value_bulk;	/* large STORE value (READ); HG_BULK_NULL when inline */
 	hg_bulk_t		result_sink;	/* HG_BULK_NULL when the value rode inline */
 };
 
@@ -897,6 +898,7 @@ nkvx_kv_forward_cb(const struct hg_cb_info *info)
 	}
 
 out:
+	nkvx_bulk_release(call->front, call->value_bulk);
 	nkvx_bulk_release(call->front, call->result_sink);
 	HG_Destroy(handle);
 	free(call);
@@ -912,9 +914,16 @@ nkvx_front_kv_forward(struct nkvx_front *front, const nkvx_kv_in_t *in,
 	nkvx_kv_in_t local;		/* mutable copy: carries the bulk handle */
 	hg_handle_t handle = HG_HANDLE_NULL;
 	hg_return_t ret;
-	int rc;
 
 	if (front == NULL || in == NULL || cb == NULL) {
+		return -EINVAL;
+	}
+
+	/* A large STORE value must come with a source buffer to register as a READ bulk;
+	 * a large value_len with no value_inline would ship a request advertising a value
+	 * it can deliver neither inline nor via PULL. Reject it (mirrors the Exec input
+	 * guard in nkvx_front_forward_full). */
+	if (in->value_len > NKVX_INLINE_MAX && in->value_inline == NULL) {
 		return -EINVAL;
 	}
 
@@ -925,27 +934,64 @@ nkvx_front_kv_forward(struct nkvx_front *front, const nkvx_kv_in_t *in,
 	call->front = front;
 	call->cb = cb;
 	call->arg = arg;
+	call->value_bulk = HG_BULK_NULL;
 	call->result_sink = HG_BULK_NULL;
 
 	local = *in;
-	local.value_bulk = HG_BULK_NULL;	/* Store large-value PULL is a later slice */
+	local.value_bulk = HG_BULK_NULL;	/* originated below for a large STORE value */
 	local.result_sink = HG_BULK_NULL;
+
+	/* Originate the large STORE value bulk (the input-PULL analogue of the Exec
+	 * input_bulk): when value_len > NKVX_INLINE_MAX, register the value region
+	 * READ-mode so the executor RDMA-PULLs it. The forwarder's value source is a
+	 * TRANSIENT per-op bounce (freed at completion), NOT a recurring DPTR, so this
+	 * MUST bypass the C7.2 handle cache: the cache keeps a handle registered after
+	 * release, and a later malloc reusing the same VA with different backing pages
+	 * would hit a STALE registration (the executor would RDMA-READ unmapped/zero
+	 * pages — observed as all-zero stores in the container). Register fresh and free
+	 * it at completion (nkvx_bulk_release HG_Bulk_free's a non-cached handle). A
+	 * small value rides inline in value_inline (no bulk). */
+	if (in->value_len > NKVX_INLINE_MAX && in->value_inline != NULL) {
+		void *vaddr = in->value_inline;
+		hg_size_t vlen = in->value_len;
+
+		front->bulk_misses++;	/* uncached: always a fresh registration */
+		ret = HG_Bulk_create(front->cls, 1, &vaddr, &vlen, HG_BULK_READ_ONLY,
+				     &call->value_bulk);
+		if (ret != HG_SUCCESS) {
+			free(call);
+			return -EIO;
+		}
+		local.value_bulk = call->value_bulk;
+	}
 
 	/* Register the host output buffer WRITE-mode when it can hold a large value so
 	 * the executor PUSHes straight into it (Retrieve/List). A small value returns
-	 * inline. */
+	 * inline. Like the STORE value_bulk above, this MUST bypass the C7.2 handle
+	 * cache: through the bdev_kvrados forwarder the result_sink is a per-command
+	 * vfio-user DMA region (each rkv client op is a fresh connection), so a VA reused
+	 * across ops with different backing would hit a STALE registration and the
+	 * executor would RDMA-WRITE into unmapped/old pages — the client then reads zeros
+	 * (observed in-container). Register fresh and free at completion. (The cache
+	 * stays for the Exec path, whose tenant DPTR is stable across ops.) */
 	if (result_sink != NULL && result_sink_len > NKVX_INLINE_MAX) {
-		rc = nkvx_bulk_acquire(front, result_sink, result_sink_len,
-				       HG_BULK_WRITE_ONLY, &call->result_sink);
-		if (rc != 0) {
+		void *saddr = result_sink;
+		hg_size_t slen = result_sink_len;
+
+		front->bulk_misses++;	/* uncached: always a fresh registration */
+		ret = HG_Bulk_create(front->cls, 1, &saddr, &slen, HG_BULK_WRITE_ONLY,
+				     &call->result_sink);
+		if (ret != HG_SUCCESS) {
+			nkvx_bulk_release(front, call->value_bulk);
 			free(call);
-			return rc;
+			return -EIO;
 		}
 		local.result_sink = call->result_sink;
 	}
 
 	ret = HG_Create(front->ctx, front->addr, front->kv_rpc_id, &handle);
 	if (ret != HG_SUCCESS) {
+		nkvx_bulk_release(front, call->value_bulk);
 		nkvx_bulk_release(front, call->result_sink);
 		free(call);
 		return -EIO;
@@ -955,6 +1001,7 @@ nkvx_front_kv_forward(struct nkvx_front *front, const nkvx_kv_in_t *in,
 	ret = HG_Forward(handle, nkvx_kv_forward_cb, call, &local);
 	if (ret != HG_SUCCESS) {
 		HG_Destroy(handle);
+		nkvx_bulk_release(front, call->value_bulk);
 		nkvx_bulk_release(front, call->result_sink);
 		free(call);
 		return -EIO;

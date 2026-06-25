@@ -843,10 +843,11 @@ nkvx_store(struct nkvx_executor *ex, const char *oid,
 	}
 
 	/*
-	 * The value rides inline (value_len <= NKVX_INLINE_MAX). A large value needs
-	 * the value_bulk PULL path (the front does not yet originate it — a later
-	 * slice, same gap as Exec large-input); decline cleanly rather than write a
-	 * truncated object.
+	 * value_inline is in place by now: a small value (<= NKVX_INLINE_MAX) rode inline;
+	 * a large value was RDMA-PULLed from the front's value_bulk into a local buffer by
+	 * nkvx_kv_handler before dispatch (the input-PULL analogue of Exec large-input).
+	 * A non-empty value with no buffer means neither path delivered it — decline
+	 * cleanly rather than write a truncated object.
 	 */
 	if (value_len > 0 && value == NULL) {
 		return nkvx_result_set(res, SPDK_KVDEV_IO_STATUS_NOT_SUPPORTED, 0, NULL, 0);
