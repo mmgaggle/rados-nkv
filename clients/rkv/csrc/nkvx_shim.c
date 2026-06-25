@@ -243,11 +243,11 @@ nkvx_exec(nkvx_session *s, uint32_t nsid, const char *key, uint32_t op_id,
 	struct spdk_nvme_cmd cmd;
 	struct spdk_nvme_cpl cpl;
 	struct spdk_nvme_sgl_descriptor *segs;
-	void *buf;
-	uint64_t iova;
+	void *head, *val;
+	uint64_t head_iova = 0, val_iova = 0;
 	uint8_t key_len;
 	uint16_t klp;
-	uint32_t payload_len, bufsz, xfer_len, n;
+	uint32_t head_len, val_len, n;
 	int status, err = 0;
 
 	if (s == NULL || key == NULL) {
@@ -256,41 +256,70 @@ nkvx_exec(nkvx_session *s, uint32_t nsid, const char *key, uint32_t op_id,
 	d = &s->dev;
 	key_len = (uint8_t)strlen(key);
 	klp = key_len;
-	payload_len = (uint32_t)sizeof(uint16_t) + key_len + in_len;
-	bufsz = spdk_max(out_len, 4096);
-	/* Target maps max(vsize, osize): input gathered in, result scattered back. */
-	xfer_len = spdk_max(payload_len, out_len);
+	head_len = (uint32_t)sizeof(uint16_t) + key_len;
 
+	/*
+	 * Mirror the WORKING retrieve/store path (nvfu_kv_xfer_sgl): stage the
+	 * [u16 key_len][key] head in its OWN small DMA region and the value/result buffer
+	 * SEPARATELY, described by nvfu_sgl_set_dptr_kv as [head block][value blocks]. The
+	 * forwarder then sees value_off == head_len at the head of the SECOND SGL block,
+	 * so the value region (input in, result out) starts at val offset 0 — NOT at a
+	 * head_len offset inside one combined buffer. The old single-buffer nvfu_sgl_set_dptr
+	 * staging put the result at buf+head_len while sizing the buffer/osize as out_len,
+	 * so osize over-promised by head_len, the result sink was short, and the read ran
+	 * head_len bytes past the buffer (large exec returned 0 / wrong length, bead spdk-4i7).
+	 *
+	 * The value region carries the INPUT on the way in and the RESULT on the way out;
+	 * the forwarder maps max(vsize, osize) of it. Size the buffer to hold both. The
+	 * SGL VALUE size is osize (out_len) so the result-sink capacity the executor sees
+	 * is exactly osize (cdw12), matching what we report back.
+	 */
 	memset(&cmd, 0, sizeof(cmd));
 	memset(&cpl, 0, sizeof(cpl));
-	if (payload_len > bufsz) {
-		return -EINVAL;
-	}
-	buf = nvfu_dma_alloc(bufsz, &iova);
-	if (buf == NULL) {
+
+	val_len = spdk_max(in_len, out_len);
+	val_len = spdk_max(val_len, 1u);	/* nvfu_dma_alloc rejects size 0 */
+
+	head = nvfu_dma_alloc(head_len, &head_iova);
+	if (head == NULL) {
 		return -ENOMEM;
 	}
-	/* Stage [u16 key_len][key][input] at the buffer head. */
-	memcpy(buf, &klp, sizeof(klp));
-	memcpy((char *)buf + sizeof(klp), key, key_len);
-	if (in_len) {
-		memcpy((char *)buf + sizeof(klp) + key_len, in, in_len);
+	memcpy(head, &klp, sizeof(klp));
+	memcpy((char *)head + sizeof(klp), key, key_len);
+
+	val = nvfu_dma_alloc(val_len, &val_iova);
+	if (val == NULL) {
+		spdk_dma_free(head);
+		return -ENOMEM;
+	}
+	/* Stage the input at the head of the value region (the forwarder reads input from
+	 * value_off; result is scattered back over the same region). Zero any tail beyond
+	 * the input so a short input + larger osize sink starts clean. */
+	if (in_len > 0) {
+		memcpy(val, in, in_len);
+	}
+	if (val_len > in_len) {
+		memset((char *)val + in_len, 0, val_len - in_len);
 	}
 	spdk_wmb();
 
 	cmd.opc = SPDK_NVME_OPC_KV_EXEC;
 	cmd.nsid = nsid;
-	cmd.cdw10_bits.kv.vsize = payload_len;		/* request payload length */
+	cmd.cdw10_bits.kv.vsize = in_len;	/* VALUE (input) size only, not the key head */
+	cmd.cdw11_bits.kv.kl = 0;		/* in-payload long-key signal (ADR-0014) */
 	/* KV Exec osize/op_id were named bitfields (full-width :32) in the old SPDK
 	 * fork; the out-of-tree base SPDK (Gerrit 28298) has no kv_exec cdw members,
 	 * so write the raw CDW words — byte-identical wire output. (See the same fix
 	 * in clients/nvme-kv/kv/vfu_host/nkv_vfu.h.) */
-	cmd.cdw12 = out_len;		/* KV Exec output buffer size (vendor ext) */
+	cmd.cdw12 = out_len;		/* KV Exec output buffer size = osize (vendor ext) */
 	cmd.cdw13 = op_id;		/* KV Exec op_id (vendor ext) */
 
-	segs = nvfu_sgl_set_dptr(&cmd, iova, xfer_len, &err);
+	/* [head block][value blocks]: the value region (max(in_len,out_len)) is described
+	 * region-bounded so a > 2 MiB input/result scatters correctly. */
+	segs = nvfu_sgl_set_dptr_kv(&cmd, head_iova, head_len, val_iova, val_len, &err);
 	if (err != 0) {
-		spdk_dma_free(buf);
+		spdk_dma_free(val);
+		spdk_dma_free(head);
 		return err;
 	}
 
@@ -300,25 +329,26 @@ nkvx_exec(nkvx_session *s, uint32_t nsid, const char *key, uint32_t op_id,
 	}
 	if (status != 0 && !nvfu_status_is_buffer_too_small(status)) {
 		fprintf(stderr, "KV Exec op %u failed: status=0x%x\n", op_id, status);
-		spdk_dma_free(buf);
+		spdk_dma_free(val);
+		spdk_dma_free(head);
 		return -EIO;
 	}
 	/* BUFFER_TOO_SMALL is a recoverable short result (cdw0 = true length): fall
 	 * through and report it in *rlen so the datapath.rs size-probe re-runs into a
 	 * right-sized buffer, exactly like nkvx_retrieve (bead spdk-kbh). */
 	spdk_rmb();
-	/* Copy only what fits, but report the TRUE length so the caller can detect
-	 * and recover from a short buffer rather than truncating silently. The result
-	 * lands in the payload region AFTER the in-payload key head (the forwarder's
-	 * result sink is iovs[0] + value_off, value_off = sizeof(u16 key_len)+key_len),
-	 * NOT at the buffer head — read it from the same offset (bead spdk-4jq). */
+	/* Copy only what fits (min(true_len, our sink capacity)), but report the TRUE
+	 * length in *rlen so the caller can size-probe + re-read. The result lands at the
+	 * head of the SEPARATE value region (offset 0), exactly like nkvx_retrieve reads
+	 * from buf[0] — there is no key-head offset inside the value buffer. */
 	n = spdk_min(cpl.cdw0, out_len);
 	if (n > 0) {
-		memcpy(out, (char *)buf + sizeof(klp) + key_len, n);
+		memcpy(out, val, n);
 	}
 	if (rlen != NULL) {
 		*rlen = cpl.cdw0;
 	}
-	spdk_dma_free(buf);
+	spdk_dma_free(val);
+	spdk_dma_free(head);
 	return 0;
 }

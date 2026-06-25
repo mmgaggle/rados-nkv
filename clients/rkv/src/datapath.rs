@@ -214,8 +214,27 @@ impl Session {
     pub fn exec(&self, nsid: u32, key: &str, op_id: u32, input: &[u8]) -> Result<Vec<u8>> {
         let k = CString::new(key).context("key contains NUL")?;
 
-        // First pass: hint-sized buffer learns the true result length.
-        let mut buf = vec![0u8; RETRIEVE_HINT];
+        // First pass: probe for the true result length.
+        //
+        // The forwarder derives the EXEC input length from the request's value-region
+        // length (payload after the in-payload key head), NOT from a separate vsize
+        // field, and the value region serves as BOTH the input source and the result
+        // sink (one DPTR span). So if osize (the sink size) exceeds the input, the
+        // forwarder gathers osize bytes of input — zero-padded past the real input —
+        // and an input-echoing op (`inputecho`) would echo the padded length, not the
+        // caller's input (bead spdk-4i7). To probe WITHOUT padding the input, size the
+        // first pass to the input length when there is input (so input == result for
+        // `inputecho` round-trips exactly); use the retrieve hint only when the input is
+        // empty (e.g. `identity`/`bytecount`, which ignore the input and read the stored
+        // object). If the true result still exceeds the probe, the BUFFER_TOO_SMALL
+        // size-probe below re-runs into an exactly-sized buffer (identity/bytecount
+        // ignore the input, so the larger re-run sink is harmless).
+        let probe_len = if input.is_empty() {
+            RETRIEVE_HINT
+        } else {
+            input.len()
+        };
+        let mut buf = vec![0u8; probe_len.max(1)];
         let true_len = self.exec_raw(nsid, &k, op_id, input, &mut buf)? as usize;
 
         if true_len <= buf.len() {
