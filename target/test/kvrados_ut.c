@@ -892,6 +892,130 @@ test_exec_native_inputecho(void)
 }
 
 /*
+ * Large exec input AND result over a MULTI-REGION host SGL (bead spdk-4i7). The rkv
+ * vfio-user client splits a > 2 MiB exec buffer into one region-bounded SGL block per
+ * 2 MiB DMA region, so for a large `inputecho` BOTH the input and the (equal-length)
+ * result span MANY value iovs. The old handler read only iovs[0]: it capped the input
+ * gather and the osize at one region, truncating a large exec. The fix gathers the
+ * input across ALL iovs and sizes the sink to the FULL value region
+ * (kvrados_value_region_len), bouncing + scattering the result back across the
+ * region-bounded value iovs. Small region size here mirrors the 2 MiB structure
+ * without large allocations. Byte-exact: the result echoes the input across every
+ * region block, DW0 == the full input length, and the key head stays untouched.
+ */
+static void
+test_exec_native_inputecho_multiregion(void)
+{
+	enum { KEYLEN = 4, REGION = 8, NREG = 5 };	/* 5 region-bounded value blocks */
+	uint32_t input_len = NREG * REGION;		/* 40 B input, spans all value regions */
+	uint8_t head[2u + KEYLEN];
+	uint8_t blk[NREG][REGION];
+	struct iovec iovs[1 + NREG];
+	struct kvrados_disk *kvrados;
+	struct kvrados_channel *kch;
+	struct spdk_io_channel *ch;
+	int i, j;
+
+	kvrados = ut_create_kvrados(255, 128 * 1024, 4096, 1);
+	ut_set_native_allow(kvrados, 2, "inputecho");
+	ch = ut_make_channel(&kch);
+
+	/* iov[0] = key head ([u16 KEYLEN]["ABCD"]); iov[1..] = the value region blocks,
+	 * each one filled with a distinct, position-encoded nonzero input pattern. */
+	head[0] = (uint8_t)(KEYLEN & 0xff);
+	head[1] = (uint8_t)(KEYLEN >> 8);
+	memcpy(head + 2, "ABCD", KEYLEN);
+	iovs[0].iov_base = head;
+	iovs[0].iov_len = sizeof(head);
+	for (i = 0; i < NREG; i++) {
+		for (j = 0; j < REGION; j++) {
+			blk[i][j] = (uint8_t)(i * REGION + j + 1);	/* nonzero input */
+		}
+		iovs[1 + i].iov_base = blk[i];
+		iovs[1 + i].iov_len = REGION;
+	}
+
+	/* osize >= input_len so the full result fits; the sink spans all value iovs. */
+	ut_submit_exec(kvrados, ch, 2, input_len, iovs, 1 + NREG);
+
+	CU_ASSERT(g_completed);
+	CU_ASSERT_EQUAL(g_cpl_sct, SPDK_NVME_SCT_GENERIC);
+	CU_ASSERT_EQUAL(g_cpl_sc, SPDK_NVME_SC_SUCCESS);
+	CU_ASSERT_EQUAL(g_cpl_cdw0, input_len);		/* TRUE result length == full input */
+
+	/* inputecho copies the input back into the SAME value region: every block must
+	 * still hold its original position-encoded pattern (echo of input == input). */
+	for (i = 0; i < NREG; i++) {
+		for (j = 0; j < REGION; j++) {
+			CU_ASSERT_EQUAL(blk[i][j], (uint8_t)(i * REGION + j + 1));
+		}
+	}
+	/* The key head must be untouched by the value-region scatter. */
+	CU_ASSERT_EQUAL(head[0], (uint8_t)(KEYLEN & 0xff));
+	CU_ASSERT(memcmp(head + 2, "ABCD", KEYLEN) == 0);
+	CU_ASSERT(TAILQ_EMPTY(&kch->exec_inflight));	/* synchronous native: nothing in flight */
+
+	free(ch);
+	ut_free_allow(kvrados);
+	ut_free_kvrados(kvrados);
+}
+
+/*
+ * Multi-region exec truncation (bead spdk-4i7): a large result with osize SMALLER
+ * than the full value region reports CAPACITY_EXCEEDED (BUFFER_TOO_SMALL) with the
+ * TRUE result length in DW0 — the client size-probe signal. Only the delivered prefix
+ * is scattered back; later region blocks past osize are left untouched.
+ */
+static void
+test_exec_native_inputecho_multiregion_truncated(void)
+{
+	enum { KEYLEN = 4, REGION = 8, NREG = 5 };
+	uint32_t input_len = NREG * REGION;		/* 40 B input */
+	uint32_t osize = REGION + 3;			/* 11 B: truncates mid second block */
+	uint8_t head[2u + KEYLEN];
+	uint8_t blk[NREG][REGION];
+	struct iovec iovs[1 + NREG];
+	struct kvrados_disk *kvrados;
+	struct kvrados_channel *kch;
+	struct spdk_io_channel *ch;
+	int i, j;
+
+	kvrados = ut_create_kvrados(255, 128 * 1024, 4096, 1);
+	ut_set_native_allow(kvrados, 2, "inputecho");
+	ch = ut_make_channel(&kch);
+
+	head[0] = (uint8_t)(KEYLEN & 0xff);
+	head[1] = (uint8_t)(KEYLEN >> 8);
+	memcpy(head + 2, "ABCD", KEYLEN);
+	iovs[0].iov_base = head;
+	iovs[0].iov_len = sizeof(head);
+	for (i = 0; i < NREG; i++) {
+		for (j = 0; j < REGION; j++) {
+			blk[i][j] = (uint8_t)(i * REGION + j + 1);
+		}
+		iovs[1 + i].iov_base = blk[i];
+		iovs[1 + i].iov_len = REGION;
+	}
+
+	ut_submit_exec(kvrados, ch, 2, osize, iovs, 1 + NREG);
+
+	CU_ASSERT(g_completed);
+	CU_ASSERT_EQUAL(g_cpl_sct, SPDK_NVME_SCT_COMMAND_SPECIFIC);
+	CU_ASSERT_EQUAL(g_cpl_sc, SPDK_NVME_SC_CAPACITY_EXCEEDED);
+	CU_ASSERT_EQUAL(g_cpl_cdw0, input_len);		/* TRUE length reported despite truncation */
+
+	/* The first osize bytes echo the input (unchanged: echo == input); the tail past
+	 * osize is also unchanged here because the input already equals the echo. The key
+	 * assertion is the status + DW0 size-probe signal above. */
+	CU_ASSERT_EQUAL(blk[0][0], 1);
+	CU_ASSERT(TAILQ_EMPTY(&kch->exec_inflight));
+
+	free(ch);
+	ut_free_allow(kvrados);
+	ut_free_kvrados(kvrados);
+}
+
+/*
  * Native built-in truncation: osize smaller than the 8-byte inputlen result reports
  * CAPACITY_EXCEEDED (BUFFER_TOO_SMALL) with the TRUE length in DW0.
  */
@@ -1116,6 +1240,8 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_exec_allowlist_deny);
 	CU_ADD_TEST(suite, test_exec_native_inputlen);
 	CU_ADD_TEST(suite, test_exec_native_inputecho);
+	CU_ADD_TEST(suite, test_exec_native_inputecho_multiregion);
+	CU_ADD_TEST(suite, test_exec_native_inputecho_multiregion_truncated);
 	CU_ADD_TEST(suite, test_exec_native_truncation);
 	CU_ADD_TEST(suite, test_exec_native_needs_executor);
 	CU_ADD_TEST(suite, test_exec_bad_caps_tier);

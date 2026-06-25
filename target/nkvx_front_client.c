@@ -654,12 +654,23 @@ nkvx_front_get_bulk_stats(const struct nkvx_front *front,
  * Full forward implementation: nkvx_front_forward_tok and
  * nkvx_front_forward_dmabuf are thin wrappers. When result_sink_dmabuf_fd >= 0
  * the result_sink is registered from that dma-buf fd (uncached, S2); otherwise
- * the VA is registered cache-eligibly (the original C7 path, byte-for-byte).
+ * the VA is registered through the C7.2 cache UNLESS `uncached` is set.
+ *
+ * `uncached` (bead spdk-4i7): register input_bulk + the VA result_sink fresh
+ * (HG_Bulk_create, bypassing the VA-keyed C7.2 cache) and free them at completion.
+ * The per-command bdev_kvrados forwarder sets this — its input bounce and result
+ * sink are TRANSIENT (per-op heap / per-command vfio-user DMA region) whose VA may
+ * be reused across ops with different backing pages, so a cached (sticky) MR would
+ * go STALE and the executor would RDMA the wrong/zero pages. Callers with a STABLE
+ * recurring DPTR (the GPU KV-cache loopback / the C7.2 acceptance test) leave it
+ * false to keep the cache (no re-ibv_reg_mr on reuse). The dma-buf result_sink is
+ * always uncached regardless (keyed by fd, not VA).
  */
 static int
 nkvx_front_forward_full(struct nkvx_front *front, const nkvx_exec_in_t *in,
 			void *result_sink, uint32_t result_sink_len,
 			int result_sink_dmabuf_fd, uint64_t result_sink_dmabuf_offset,
+			bool uncached,
 			nkvx_front_done_cb cb, void *arg, uint64_t *out_token)
 {
 	struct nkvx_call *call;
@@ -721,10 +732,31 @@ nkvx_front_forward_full(struct nkvx_front *front, const nkvx_exec_in_t *in,
 	local.result_sink = HG_BULK_NULL;
 
 	if (in->input_len > NKVX_INLINE_MAX && in->input_inline != NULL) {
-		/* C7.2: reuse a cached MR/hg_bulk handle for this input DPTR, or
-		 * register one (design §4.3); released back to the cache in the cb. */
-		rc = nkvx_bulk_acquire(front, in->input_inline, in->input_len,
-				       HG_BULK_READ_ONLY, &call->input_bulk);
+		/*
+		 * C7.2 / bead spdk-4i7. Register the input DPTR READ-mode so the executor
+		 * RDMA-PULLs it. CACHED for a STABLE recurring DPTR (the GPU KV-cache loopback:
+		 * SPDK pool-recycles the same buffer, so a (addr,len,flags)-keyed handle is
+		 * reused and we skip re-ibv_reg_mr'ing ~16K pages). UNCACHED when `uncached` is
+		 * set — the per-command bdev_kvrados forwarder passes a TRANSIENT per-op heap
+		 * bounce (kctx->input_bounce, freed at completion); the VA-keyed cache keeps a
+		 * handle registered after release, so a later malloc reusing that VA with
+		 * different backing pages would HIT a STALE MR and the executor would RDMA-READ
+		 * unmapped/zero pages (observed in-container as a large Exec input reading zeros).
+		 * Either way nkvx_bulk_release frees it correctly: a cached handle stays
+		 * registered for reuse; an uncached one is HG_Bulk_free'd (not-found path).
+		 */
+		if (uncached) {
+			void *iaddr = in->input_inline;
+			hg_size_t ilen = in->input_len;
+
+			front->bulk_misses++;	/* uncached: always a fresh registration */
+			ret = HG_Bulk_create(front->cls, 1, &iaddr, &ilen,
+					     HG_BULK_READ_ONLY, &call->input_bulk);
+			rc = (ret == HG_SUCCESS) ? 0 : -EIO;
+		} else {
+			rc = nkvx_bulk_acquire(front, in->input_inline, in->input_len,
+					       HG_BULK_READ_ONLY, &call->input_bulk);
+		}
 		if (rc != 0) {
 			free(call);
 			return rc;
@@ -750,17 +782,47 @@ nkvx_front_forward_full(struct nkvx_front *front, const nkvx_exec_in_t *in,
 						      result_sink_dmabuf_fd,
 						      result_sink_dmabuf_offset,
 						      &call->result_sink);
+			if (rc != 0) {
+				nkvx_bulk_release(front, call->input_bulk);
+				free(call);
+				return rc;
+			}
+		} else if (uncached) {
+			/*
+			 * Bulk-cache staleness fix (bead spdk-4i7, mirrors the KV-path
+			 * result_sink in nkvx_front_kv_forward): through the per-command
+			 * bdev_kvrados forwarder the result sink is a per-command vfio-user
+			 * DMA region (each rkv client op is a fresh connection whose DMA
+			 * region VA can be reused across ops with different backing pages).
+			 * The C7.2 VA-keyed cache keeps the handle registered after release,
+			 * so a reused VA would HIT a STALE MR and the executor would
+			 * RDMA-WRITE into unmapped/old pages — the client then reads zeros
+			 * (observed in-container). Register UNCACHED (HG_Bulk_create) and free
+			 * it at completion; nkvx_bulk_release HG_Bulk_free's a non-cached
+			 * handle, so every release site frees it correctly.
+			 */
+			void *saddr = result_sink;
+			hg_size_t slen = result_sink_len;
+
+			front->bulk_misses++;	/* uncached: always a fresh registration */
+			ret = HG_Bulk_create(front->cls, 1, &saddr, &slen,
+					     HG_BULK_WRITE_ONLY, &call->result_sink);
+			if (ret != HG_SUCCESS) {
+				nkvx_bulk_release(front, call->input_bulk);
+				free(call);
+				return -EIO;
+			}
 		} else {
-			/* C7.2: reuse a cached MR/hg_bulk handle for this result-sink
-			 * DPTR (the recurring tenant output buffer), or register one. */
+			/* C7.2 CACHED: a recurring tenant output buffer (the GPU KV-cache
+			 * sink, pool-recycled with a stable mapping) reuses its WRITE-mode
+			 * handle across Execs — no re-ibv_reg_mr. */
 			rc = nkvx_bulk_acquire(front, result_sink, result_sink_len,
-					       HG_BULK_WRITE_ONLY,
-					       &call->result_sink);
-		}
-		if (rc != 0) {
-			nkvx_bulk_release(front, call->input_bulk);
-			free(call);
-			return rc;
+					       HG_BULK_WRITE_ONLY, &call->result_sink);
+			if (rc != 0) {
+				nkvx_bulk_release(front, call->input_bulk);
+				free(call);
+				return rc;
+			}
 		}
 		local.result_sink = call->result_sink;
 	}
@@ -818,9 +880,23 @@ nkvx_front_forward_tok(struct nkvx_front *front, const nkvx_exec_in_t *in,
 		       void *result_sink, uint32_t result_sink_len,
 		       nkvx_front_done_cb cb, void *arg, uint64_t *out_token)
 {
-	/* VA-registered result_sink (dmabuf_fd = -1): the original C7 path. */
+	/* VA-registered result_sink (dmabuf_fd = -1), CACHE-ELIGIBLE: the original C7
+	 * path (stable recurring DPTR — the GPU KV-cache loopback / C7.2 acceptance). */
 	return nkvx_front_forward_full(front, in, result_sink, result_sink_len,
-				       -1, 0, cb, arg, out_token);
+				       -1, 0, false /* cached */, cb, arg, out_token);
+}
+
+int
+nkvx_front_forward_tok_uncached(struct nkvx_front *front, const nkvx_exec_in_t *in,
+				void *result_sink, uint32_t result_sink_len,
+				nkvx_front_done_cb cb, void *arg, uint64_t *out_token)
+{
+	/* VA-registered result_sink, UNCACHED (bead spdk-4i7): the per-command
+	 * bdev_kvrados forwarder path. input_bulk + result_sink are transient buffers
+	 * whose VA may be reused with different backing pages, so they must NOT enter
+	 * the sticky VA-keyed C7.2 cache (stale-MR / RDMA-wrong-pages otherwise). */
+	return nkvx_front_forward_full(front, in, result_sink, result_sink_len,
+				       -1, 0, true /* uncached */, cb, arg, out_token);
 }
 
 int
@@ -830,11 +906,13 @@ nkvx_front_forward_dmabuf(struct nkvx_front *front, const nkvx_exec_in_t *in,
 			  uint64_t result_sink_dmabuf_offset,
 			  nkvx_front_done_cb cb, void *arg, uint64_t *out_token)
 {
-	/* S2 dma-buf bulk path: register the result_sink from a dma-buf fd. */
+	/* S2 dma-buf bulk path: register the result_sink from a dma-buf fd (intrinsically
+	 * uncached — keyed by fd). The input_bulk uses the cache (uncached=false): the
+	 * dma-buf callers' input source, when present, is the stable mixed-SGL DPTR. */
 	return nkvx_front_forward_full(front, in, result_sink, result_sink_len,
 				       result_sink_dmabuf_fd,
-				       result_sink_dmabuf_offset, cb, arg,
-				       out_token);
+				       result_sink_dmabuf_offset, false /* cached input */,
+				       cb, arg, out_token);
 }
 
 int
@@ -843,7 +921,7 @@ nkvx_front_forward(struct nkvx_front *front, const nkvx_exec_in_t *in,
 		   nkvx_front_done_cb cb, void *arg)
 {
 	/* Token-less convenience wrapper (channel-destroy cancel_all does not need a
-	 * per-call token; the standalone front UT calls this form). */
+	 * per-call token; the standalone front UT calls this form). Cache-eligible. */
 	return nkvx_front_forward_tok(front, in, result_sink, result_sink_len,
 				      cb, arg, NULL);
 }

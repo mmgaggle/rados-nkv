@@ -605,10 +605,11 @@ kvrados_native_builtin_exec(const char *module_key,
 
 /*
  * Complete an in-flight KV Exec exactly once: unlink it from the channel's
- * exec_inflight list (so a racing/late ABORT cannot target a freed ctx), set CQE
+ * exec_inflight list (so a racing/late ABORT cannot target a freed ctx), reassemble
+ * a multi-region result (scatter the bounce back across the host value SGL), set CQE
  * DW0 to the TRUE result length, map the status, complete the io, and free the ctx
- * (and any input bounce). Used by BOTH the native executor (synchronous) and the
- * Mercury forward done-cb.
+ * (and any input/output bounce). Used by BOTH the native executor (synchronous) and
+ * the Mercury forward done-cb.
  */
 static void
 kvrados_exec_complete(struct kvrados_kv_io_ctx *kctx, enum spdk_kvdev_io_status status,
@@ -622,9 +623,29 @@ kvrados_exec_complete(struct kvrados_kv_io_ctx *kctx, enum spdk_kvdev_io_status 
 		kctx->is_exec = false;
 	}
 
+	/*
+	 * Multi-region exec result reassembly (bead spdk-4i7, mirrors RETRIEVE): the
+	 * executor wrote the result into the contiguous output_bounce; scatter it back
+	 * across the host value SGL (one region-bounded iov per 2 MiB DMA region). Scatter
+	 * min(delivered, capacity): result_len is the TRUE length (may exceed the buffer on
+	 * BUFFER_TOO_SMALL — DW0 still reports it for the client size-probe), so cap at the
+	 * bounce length. NULL on the zero-copy single-region path (the result already landed
+	 * in the host iov). Done BEFORE completing the io so the host SGL is fully written
+	 * when the tenant sees the CQE.
+	 */
+	if (kctx->output_bounce != NULL) {
+		uint32_t deliver = spdk_min(result_len, kctx->output_bounce_len);
+
+		if (deliver > 0) {
+			kvrados_scatter(kctx->host_iovs, kctx->host_iovcnt,
+					kctx->value_off, kctx->output_bounce, deliver);
+		}
+	}
+
 	kvrados_kvdev_status_to_nvme(status, &sct, &sc);
 	spdk_bdev_io_complete_nvme_status(bdev_io, result_len, sct, sc);
 	free(kctx->input_bounce);
+	free(kctx->output_bounce);
 	free(kctx);
 }
 
@@ -676,6 +697,7 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 	void *out_buf = NULL;
 	uint32_t out_len = 0;
 	uint8_t *input_bounce = NULL;
+	uint8_t *output_bounce = NULL;
 	struct kvrados_kv_io_ctx *kctx;
 	uint64_t head_payload = payload_len;
 
@@ -712,16 +734,34 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 	}
 
 	/*
-	 * (3) input = payload after the key head. The result sink is the host buffer
-	 * after the input (host-VA path); osize bounds how many bytes are copied back.
+	 * (3) input = payload after the key head; the result sink is the host buffer
+	 * region after the key head (input and result OVERLAP this same span — the rkv
+	 * client stages [u16 key_len][key][input] and reads the result back from the same
+	 * value_off, see nkvx_exec in clients/rkv/csrc/nkvx_shim.c). osize bounds how many
+	 * result bytes are copied back.
+	 *
+	 * The rkv vfio-user client splits a > 2 MiB exec buffer into one region-bounded
+	 * SGL block per 2 MiB DMA region (nvfu_sgl_set_dptr), so for a large input AND/OR a
+	 * large result the value region spans MANY iovs. Taking only iovs[0] (the old code)
+	 * capped both the input gather and the osize at one 2 MiB region: a large exec input
+	 * (> first region) read truncated, and a large exec result (e.g. `identity` over a
+	 * > 2 MiB object) completed BUFFER_TOO_SMALL. Mirror the S1 RETRIEVE multi-region fix
+	 * (bead spdk-kbh): gather the input across all iovs into a contiguous bounce, and
+	 * size the sink to the FULL value region with kvrados_value_region_len, bouncing +
+	 * scattering when it spans > 1 iov.
 	 */
 	if (head_payload > value_off) {
 		uint64_t ilen = head_payload - value_off;
 
 		input_len = (uint32_t)spdk_min(ilen, (uint64_t)UINT32_MAX);
 		if (iovcnt >= 1 && iovs[0].iov_len >= value_off + input_len) {
+			/* Single-region zero-copy: the whole input lives in iov[0]. */
 			input = (const uint8_t *)iovs[0].iov_base + value_off;
 		} else if (input_len > 0) {
+			/* Multi-region (or non-contiguous): gather across ALL iovs into a
+			 * contiguous heap bounce. The forward may register this as a large-input
+			 * bulk PULL source, so it must outlive the in-flight forward (kctx owns
+			 * it; freed in kvrados_exec_complete). */
 			input_bounce = malloc(input_len);
 			if (input_bounce == NULL) {
 				spdk_bdev_io_complete_nvme_status(bdev_io, 0,
@@ -734,15 +774,61 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 		}
 	}
 
-	/* Host-VA result sink: the host buffer after the input, bounded by osize. */
-	if (iovcnt >= 1 && iovs[0].iov_len > value_off) {
-		out_buf = (uint8_t *)iovs[0].iov_base + value_off;
-		out_len = (uint32_t)spdk_min(iovs[0].iov_len - value_off, (uint64_t)osize);
+	/*
+	 * Host-VA result sink, sized to the FULL value region (sum over all value iovs),
+	 * bounded by osize. A single-region sink stays zero-copy straight into the host
+	 * iov; a multi-region sink (value > one 2 MiB region) PUSHes/writes into a
+	 * contiguous heap bounce that kvrados_exec_complete scatters back across the host
+	 * value SGL — the exec mirror of the RETRIEVE sink (bead spdk-kbh).
+	 */
+	{
+		uint64_t value_total = kvrados_value_region_len(iovs, iovcnt, value_off);
+		uint64_t first_len = 0;
+		uint8_t *first_span = NULL;
+		uint64_t io_off = 0;
+		int j;
+
+		for (j = 0; j < iovcnt; j++) {
+			if (value_off < io_off + iovs[j].iov_len) {
+				uint64_t in_iov = value_off - io_off;
+
+				first_span = (uint8_t *)iovs[j].iov_base + in_iov;
+				first_len = iovs[j].iov_len - in_iov;
+				break;
+			}
+			io_off += iovs[j].iov_len;
+		}
+
+		/* osize caps how many result bytes the executor delivers; the sink capacity is
+		 * the smaller of the host value region and osize. */
+		out_len = (uint32_t)spdk_min(value_total, (uint64_t)osize);
+
+		if (out_len == 0) {
+			out_buf = first_span;	/* status-only result */
+		} else if (first_len >= out_len) {
+			/* Single contiguous region covers the whole sink: zero-copy. */
+			out_buf = first_span;
+		} else {
+			/* Multi-region: write into a contiguous bounce, scatter back at
+			 * completion. The bounce outlives the forward (the executor PUSHes after
+			 * the forward returns), so kctx owns it and frees it in
+			 * kvrados_exec_complete. */
+			output_bounce = malloc(out_len);
+			if (output_bounce == NULL) {
+				free(input_bounce);
+				spdk_bdev_io_complete_nvme_status(bdev_io, 0,
+								  SPDK_NVME_SCT_GENERIC,
+								  SPDK_NVME_SC_INTERNAL_DEVICE_ERROR);
+				return;
+			}
+			out_buf = output_bounce;
+		}
 	}
 
 	kctx = calloc(1, sizeof(*kctx));
 	if (kctx == NULL) {
 		free(input_bounce);
+		free(output_bounce);
 		spdk_bdev_io_complete_nvme_status(bdev_io, 0, SPDK_NVME_SCT_GENERIC,
 						  SPDK_NVME_SC_INTERNAL_DEVICE_ERROR);
 		return;
@@ -752,6 +838,15 @@ kvrados_handle_exec(struct kvrados_disk *kvrados, struct kvrados_channel *kch,
 	kctx->kch = kch;
 	kctx->cancel_token = 0; /* KVDEV_RADOS_NKVX_TOKEN_NONE */
 	kctx->input_bounce = input_bounce;	/* owned; freed in exec_complete */
+	if (output_bounce != NULL) {
+		/* Multi-region sink reassembly (mirrors RETRIEVE): scatter the executor's
+		 * result from output_bounce back across the host value SGL at completion. */
+		kctx->output_bounce = output_bounce;
+		kctx->output_bounce_len = out_len;
+		kctx->host_iovs = iovs;
+		kctx->host_iovcnt = iovcnt;
+		kctx->value_off = value_off;
+	}
 	TAILQ_INSERT_TAIL(&kch->exec_inflight, kctx, exec_link);
 
 	SPDK_DEBUGLOG(bdev_kvrados,
