@@ -151,6 +151,25 @@ int nkvx_front_forward_tok(struct nkvx_front *front, const nkvx_exec_in_t *in,
 			   nkvx_front_done_cb cb, void *arg, uint64_t *out_token);
 
 /**
+ * Like nkvx_front_forward_tok(), but register the input_bulk and the (VA)
+ * result_sink UNCACHED — fresh HG_Bulk_create per call, freed (HG_Bulk_free) at
+ * completion, bypassing the VA-keyed C7.2 handle cache (bead spdk-4i7).
+ *
+ * Use this from the PER-COMMAND bdev_kvrados forwarder, where the input source is
+ * a transient per-op heap bounce and the result_sink is a per-command vfio-user DMA
+ * region: their VAs can be reused across ops with DIFFERENT backing pages, so a
+ * sticky cached MR would go STALE and the executor would RDMA the wrong/zero pages
+ * (observed in-container). Callers with a STABLE recurring DPTR (the GPU KV-cache
+ * loopback, which pool-recycles one mapping) use nkvx_front_forward_tok() instead to
+ * keep the cache (no re-ibv_reg_mr on reuse — the C7.2 perf win). Same contract and
+ * lifetime rules as nkvx_front_forward_tok() otherwise.
+ */
+int nkvx_front_forward_tok_uncached(struct nkvx_front *front, const nkvx_exec_in_t *in,
+				    void *result_sink, uint32_t result_sink_len,
+				    nkvx_front_done_cb cb, void *arg,
+				    uint64_t *out_token);
+
+/**
  * Like nkvx_front_forward(), but register the large \p result_sink from a DMA-BUF
  * fd instead of its virtual address (rados-nkvx S2 dma-buf bulk path, bead
  * spdk-a27). When \p result_sink_dmabuf_fd >= 0 and \p result_sink_len >

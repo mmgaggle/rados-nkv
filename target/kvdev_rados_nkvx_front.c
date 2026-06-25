@@ -175,9 +175,16 @@ kvdev_rados_nkvx_front_forward(struct nkvx_front *front,
 	 * bytes land in this same buffer — no double delivery (the executor inlines
 	 * XOR pushes), and the done-cb's memcpy is a no-op on the push path (inline
 	 * is empty). Large input is likewise registered from in.input_inline.
+	 *
+	 * UNCACHED variant (bead spdk-4i7): this is the PER-COMMAND forwarder. The
+	 * output_buf (a per-command vfio-user DMA region the bdev scatters from) and the
+	 * large-input source (a per-op heap bounce) are TRANSIENT — their VA can be
+	 * reused across ops with different backing pages — so they must bypass the
+	 * VA-keyed C7.2 handle cache, or a stale sticky MR makes the executor RDMA the
+	 * wrong/zero pages (the KV path already registers uncached for the same reason).
 	 */
-	rc = nkvx_front_forward_tok(front, &in, output_buf, output_buf_len,
-				    kvdev_rados_nkvx_front_done, ctx, out_token);
+	rc = nkvx_front_forward_tok_uncached(front, &in, output_buf, output_buf_len,
+					     kvdev_rados_nkvx_front_done, ctx, out_token);
 	if (rc != 0) {
 		free(ctx);
 		return rc;
