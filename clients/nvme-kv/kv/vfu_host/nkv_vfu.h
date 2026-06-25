@@ -682,9 +682,81 @@ nvfu_sgl_set_dptr(struct spdk_nvme_cmd *cmd, uint64_t buf_iova, uint32_t len, in
 	return segs;
 }
 
+/*
+ * Like nvfu_sgl_set_dptr, but the SGL's FIRST data block is a separate in-payload
+ * key head [u16 key_len][key] (head_iova/head_len, its own small DMA region),
+ * followed by the value buffer's region-bounded data blocks (val_iova/val_len).
+ * The target gathers [key head][value] as one logical payload while the VALUE
+ * buffer stays a SEPARATE, untouched region — so it can originate from VRAM /
+ * p2pdma and (once the store value-bulk slice lands) be RDMA'd zero-copy. The head
+ * is <= 257 B (one region); the value is split one data block per 2 MiB region.
+ * Always emits a segment list (>= 1 head block, plus 0..N value blocks). Returns
+ * the descriptor-list DMA buffer the caller must spdk_dma_free(); NULL + *err OOM.
+ */
+static inline struct spdk_nvme_sgl_descriptor *
+nvfu_sgl_set_dptr_kv(struct spdk_nvme_cmd *cmd, uint64_t head_iova, uint32_t head_len,
+		     uint64_t val_iova, uint32_t val_len, int *err)
+{
+	struct spdk_nvme_sgl_descriptor *segs;
+	uint64_t segs_iova = 0, off;
+	uint64_t first_chunk = NVFU_DMA_REGION - (val_iova & (NVFU_DMA_REGION - 1));
+	uint32_t val_nseg, nseg, i;
+
+	*err = 0;
+
+	if (val_len == 0) {
+		val_nseg = 0;
+	} else if (val_len <= first_chunk) {
+		val_nseg = 1;
+	} else {
+		val_nseg = 1 + (uint32_t)((val_len - first_chunk + NVFU_DMA_REGION - 1) / NVFU_DMA_REGION);
+	}
+	nseg = 1 + val_nseg;	/* key head + value blocks */
+
+	segs = (struct spdk_nvme_sgl_descriptor *)nvfu_dma_alloc(nseg * sizeof(*segs), &segs_iova);
+	if (segs == NULL) {
+		*err = -ENOMEM;
+		return NULL;
+	}
+
+	/* seg[0]: the in-payload key head (its own region). */
+	memset(&segs[0], 0, sizeof(segs[0]));
+	segs[0].address = head_iova;
+	segs[0].unkeyed.length = head_len;
+	segs[0].unkeyed.type = SPDK_NVME_SGL_TYPE_DATA_BLOCK;
+
+	/* seg[1..]: the value buffer, one region-bounded data block per 2 MiB region. */
+	off = 0;
+	for (i = 0; i < val_nseg; i++) {
+		uint64_t chunk = (i == 0) ? first_chunk : NVFU_DMA_REGION;
+
+		if (off + chunk > val_len) {
+			chunk = val_len - off;
+		}
+		memset(&segs[1 + i], 0, sizeof(segs[1 + i]));
+		segs[1 + i].address = val_iova + off;
+		segs[1 + i].unkeyed.length = (uint32_t)chunk;
+		segs[1 + i].unkeyed.type = SPDK_NVME_SGL_TYPE_DATA_BLOCK;
+		off += chunk;
+	}
+
+	cmd->psdt = SPDK_NVME_PSDT_SGL_MPTR_SGL;
+	cmd->dptr.sgl1.address = segs_iova;
+	cmd->dptr.sgl1.unkeyed.length = nseg * sizeof(*segs);
+	cmd->dptr.sgl1.unkeyed.type = SPDK_NVME_SGL_TYPE_LAST_SEGMENT;
+	return segs;
+}
+
 /* KV Store/Retrieve of a value buffer transferred via a region-bounded SGL.
  * nsid is threaded explicitly (default-preserving: callers pass KV_NSID to keep
  * prior behaviour) so the rados-nkv CLI can address any namespace.
+ *
+ * IN-PAYLOAD LONG-KEY (ADR-0014): the forwarder reads the key from a
+ * [u16 key_len][key] prefix at the HEAD of the DPTR, NOT the CDW key slots. We
+ * stage that head in its own tiny DMA region and describe it as the first SGL
+ * data block, AHEAD of the (untouched) value buffer — keeping the value a
+ * separate region so it stays VRAM/p2pdma-capable. CDW11.kl is left 0 (long-key
+ * signal); CDW10 (vsize) carries the VALUE size only (not the key head).
  *
  * ro carries the CDW11 Request Options byte (Store Option bits: SIKE/SINKE,
  * TTL_VALID, EPHEMERAL, TOUCH) and ttl the CDW12 TTL in seconds; both are
@@ -697,22 +769,37 @@ nvfu_kv_xfer_sgl(struct nvfu_dev *d, uint32_t nsid, uint8_t opc, const char *key
 {
 	struct spdk_nvme_cmd cmd;
 	struct spdk_nvme_sgl_descriptor *segs;
+	void *head;
+	uint64_t head_iova = 0;
+	uint8_t key_len = (uint8_t)strlen(key);
+	uint16_t klp = key_len;
+	uint32_t head_len = (uint32_t)sizeof(uint16_t) + key_len;
 	int rc, err = 0;
+
+	/* Stage [u16 key_len][key] in its own small DMA region (the in-payload head). */
+	head = nvfu_dma_alloc(head_len, &head_iova);
+	if (head == NULL) {
+		return -ENOMEM;
+	}
+	memcpy(head, &klp, sizeof(klp));
+	memcpy((char *)head + sizeof(klp), key, key_len);
+	spdk_wmb();
 
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opc = opc;
 	cmd.nsid = nsid;
-	cmd.cdw10_bits.kv.vsize = size;
+	cmd.cdw10_bits.kv.vsize = size;		/* VALUE size only (not the key head) */
+	cmd.cdw11_bits.kv.kl = 0;		/* in-payload long-key signal (ADR-0014) */
 	if (opc == SPDK_NVME_OPC_KV_STORE) {
 		cmd.cdw11_bits.kv.ro = ro;
 		if (ro & SPDK_NVME_KV_STORE_OPT_TTL_VALID) {
 			cmd.cdw12 = ttl;	/* KV Store TTL (vendor ext) */
 		}
 	}
-	nvfu_kv_set_key(&cmd, key, (uint8_t)strlen(key));
 
-	segs = nvfu_sgl_set_dptr(&cmd, buf_iova, size, &err);
+	segs = nvfu_sgl_set_dptr_kv(&cmd, head_iova, head_len, buf_iova, size, &err);
 	if (err != 0) {
+		spdk_dma_free(head);
 		return err;
 	}
 
@@ -720,6 +807,7 @@ nvfu_kv_xfer_sgl(struct nvfu_dev *d, uint32_t nsid, uint8_t opc, const char *key
 	if (segs != NULL) {
 		spdk_dma_free(segs);
 	}
+	spdk_dma_free(head);
 	return rc;
 }
 

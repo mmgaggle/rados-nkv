@@ -796,21 +796,32 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 			}
 
 			/*
-			 * The value buffer is the SGL region AFTER the key header. For the
-			 * common single-iov case it is a contiguous span we hand the bridge as
-			 * the result sink (zero-copy / PUSH for large values). A small value
-			 * comes back inline and the bridge copies it into this buffer. For a
-			 * multi-iov SGL where the value does not start cleanly in iov[0], we
-			 * bounce only the result into a temp — but in practice nvmf delivers the
-			 * tenant DPTR as one mapped region per S0, so iov[0] holds the value.
+			 * The value buffer is the SGL region AFTER the key header, at payload
+			 * offset value_off. The client may carry the key head EITHER inline in
+			 * iov[0] before the value (single contiguous DPTR) OR as its own SGL
+			 * segment, in which case value_off lands at the head of a later iov (the
+			 * value stays a separate, VRAM/p2pdma-capable region). Walk the SGL to
+			 * the iov holding value_off and hand the bridge that contiguous span as
+			 * the result sink (zero-copy / PUSH for large values; a small value comes
+			 * back inline and the bridge copies it in).
 			 */
-			if (iovcnt >= 1 && iovs[0].iov_len > value_off) {
-				out_buf = (uint8_t *)iovs[0].iov_base + value_off;
-				out_len = (uint32_t)spdk_min(iovs[0].iov_len - value_off,
-							     (uint64_t)UINT32_MAX);
-			} else {
-				out_buf = NULL;
-				out_len = 0;
+			out_buf = NULL;
+			out_len = 0;
+			{
+				uint64_t io_off = 0;
+				int j;
+
+				for (j = 0; j < iovcnt; j++) {
+					if (value_off < io_off + iovs[j].iov_len) {
+						uint64_t in_iov = value_off - io_off;
+
+						out_buf = (uint8_t *)iovs[j].iov_base + in_iov;
+						out_len = (uint32_t)spdk_min(iovs[j].iov_len - in_iov,
+									     (uint64_t)UINT32_MAX);
+						break;
+					}
+					io_off += iovs[j].iov_len;
+				}
 			}
 
 			kctx = calloc(1, sizeof(*kctx));
