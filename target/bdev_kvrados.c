@@ -26,6 +26,7 @@
  */
 #ifdef NKVX_WITH_MERCURY
 #include "kvdev_rados_nkvx_front.h"	/* the front Mercury bridge (reused from kvdev_rados) */
+#include "nkvx_exec_rpc.h"		/* NKVX_INLINE_MAX (small/large value threshold) */
 #endif
 
 /* Default KV parameter values. */
@@ -99,9 +100,12 @@ struct kvrados_kv_io_ctx {
 	struct kvrados_channel		*kch;
 	uint64_t			cancel_token;	/* KVDEV_RADOS_NKVX_TOKEN_NONE if none */
 	/*
-	 * A multi-iov Exec input gathered into a temp. The forward may register it as
-	 * a bulk PULL source (large input), so it MUST outlive the in-flight forward —
-	 * freed at completion (kvrados_exec_complete), not right after submit.
+	 * A multi-segment Exec input OR Store value gathered into a temp. The forward may
+	 * register it as a bulk PULL source (large input / large value), so it MUST outlive
+	 * the in-flight forward — freed at completion (kvrados_exec_complete for Exec,
+	 * kvrados_retrieve_done for Store), not right after submit. NULL on the zero-copy
+	 * path (the value/input is read straight from the bdev_io DMA region) and for the
+	 * read verbs.
 	 */
 	void				*input_bounce;
 	TAILQ_ENTRY(kvrados_kv_io_ctx)	exec_link;
@@ -293,6 +297,9 @@ kvrados_retrieve_done(void *cb_arg, int status, uint32_t value_len)
 	/* CQE DW0 = full value length (truncation semantics, ADR-0014): the cdw0 arg is
 	 * surfaced by nvmf via spdk_bdev_io_get_nvme_status. */
 	spdk_bdev_io_complete_nvme_status(bdev_io, value_len, sct, sc);
+	/* Free a large-Store value bounce (registered as the value_bulk PULL source, so it
+	 * had to outlive the in-flight forward). NULL for zero-copy stores and read verbs. */
+	free(kctx->input_bounce);
 	free(kctx);
 }
 #endif /* NKVX_WITH_MERCURY */
@@ -877,6 +884,7 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 			uint64_t value_len64 = (payload_len > value_off) ? payload_len - value_off : 0;
 			uint32_t value_len = (uint32_t)spdk_min(value_len64, (uint64_t)UINT32_MAX);
 			void *value = NULL;
+			void *value_bounce = NULL;	/* gathered multi-segment value; outlives the RPC */
 			int frc;
 
 			if (kch->front == NULL) {
@@ -889,38 +897,74 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 			}
 
 			/*
-			 * Gather the value (SGL region after the key header) into a temp the
-			 * forward serializes synchronously. The common single-iov case is a
-			 * contiguous span we pass directly (zero-copy); a multi-iov value is
-			 * gathered. Large-value (> NKVX_INLINE_MAX) PULL is a later slice — the
-			 * executor declines NOT_SUPPORTED for now.
+			 * Locate the value: the SGL region after the key header, at payload
+			 * offset value_off (after A's in-payload key the value is its own SGL
+			 * segment). Walk to the iov holding value_off (mirrors the RETRIEVE sink
+			 * walk) to find the contiguous span.
+			 *
+			 * Delivery splits by size:
+			 *   - SMALL (<= NKVX_INLINE_MAX): rides inline, serialized synchronously by
+			 *     the forward via a CPU read — so a contiguous span is handed directly
+			 *     (zero-copy); the client's vfio-user DMA region is fine to memcpy from.
+			 *   - LARGE (> NKVX_INLINE_MAX): the executor RDMA-PULLs the value, so the
+			 *     source must be a buffer the forwarder can ibv_reg_mr and the remote
+			 *     NIC can read. A plain-VA bulk over the client's vfio-user mapping is
+			 *     NOT remotely readable (the executor's RDMA-READ returns zeros — proven
+			 *     in-container), so gather the value into a forwarder heap bounce, which
+			 *     is registerable. The bounce backs the in-flight PULL, so it MUST
+			 *     outlive the forward (kctx owns it, freed in kvrados_retrieve_done).
+			 *     This mirrors the Exec large-input path, which also bounces. (True
+			 *     zero-copy / p2pdma straight from the client buffer needs memory_domain
+			 *     / dma-buf MR registration of the vfio-user region — a later slice.)
 			 */
 			if (value_len > 0) {
-				if (iovcnt >= 1 && iovs[0].iov_len >= value_off + value_len) {
-					value = (uint8_t *)iovs[0].iov_base + value_off;
+				uint8_t *span = NULL;
+				uint64_t span_len = 0;
+				uint64_t io_off = 0;
+				int j;
+
+				for (j = 0; j < iovcnt; j++) {
+					if (value_off < io_off + iovs[j].iov_len) {
+						uint64_t in_iov = value_off - io_off;
+
+						span = (uint8_t *)iovs[j].iov_base + in_iov;
+						span_len = iovs[j].iov_len - in_iov;
+						break;
+					}
+					io_off += iovs[j].iov_len;
+				}
+
+				if (value_len <= NKVX_INLINE_MAX && span != NULL &&
+				    span_len >= value_len) {
+					value = span;			/* small + contiguous: zero-copy inline */
 				} else {
-					value = malloc(value_len);
-					if (value == NULL) {
+					/* Large (RDMA-PULL source) or a non-contiguous small value:
+					 * gather into a registerable forwarder bounce. */
+					value_bounce = malloc(value_len);
+					if (value_bounce == NULL) {
 						spdk_bdev_io_complete_nvme_status(bdev_io, 0,
 								  SPDK_NVME_SCT_GENERIC,
 								  SPDK_NVME_SC_INTERNAL_DEVICE_ERROR);
 						return;
 					}
-					kvrados_gather(iovs, iovcnt, value_off, value, value_len);
+					kvrados_gather(iovs, iovcnt, value_off, value_bounce, value_len);
+					value = value_bounce;
 				}
 			}
 
 			kctx = calloc(1, sizeof(*kctx));
 			if (kctx == NULL) {
-				if (value != NULL && (iovcnt < 1 || iovs[0].iov_len < value_off + value_len)) {
-					free(value);
-				}
+				free(value_bounce);
 				spdk_bdev_io_complete_nvme_status(bdev_io, 0,
 								  SPDK_NVME_SCT_GENERIC,
 								  SPDK_NVME_SC_INTERNAL_DEVICE_ERROR);
 				return;
 			}
 			kctx->bdev_io = bdev_io;
+			/* Own the gather bounce (if any): a large value is RDMA-PULLed by the
+			 * executor AFTER the forward returns, so the source must stay valid until
+			 * completion. NULL on the zero-copy path. Freed in kvrados_retrieve_done. */
+			kctx->input_bounce = value_bounce;
 
 			SPDK_DEBUGLOG(bdev_kvrados,
 				      "%s: KV STORE key_len=%u value_len=%u flags=0x%x ro=%d\n",
@@ -931,14 +975,14 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 							   kvrados->read_only, store_flags,
 							   value, value_len,
 							   kvrados_retrieve_done, kctx);
-			/* The value bytes were serialized synchronously by the forward; a
-			 * bounce gather buffer can be released now. */
-			if (value != NULL && (iovcnt < 1 || iovs[0].iov_len < value_off + value_len)) {
-				free(value);
-			}
+			/* On success the forward owns the value lifetime via kctx (the value
+			 * bytes ride inline synchronously for a small value, or are PULLed later
+			 * from the zero-copy region / bounce for a large one). On failure cb did
+			 * not run, so release the bounce + kctx here. */
 			if (frc != 0) {
 				SPDK_ERRLOG("%s: KV STORE forward failed: %d\n",
 					    kvrados->disk.name, frc);
+				free(kctx->input_bounce);
 				free(kctx);
 				spdk_bdev_io_complete_nvme_status(bdev_io, 0,
 								  SPDK_NVME_SCT_GENERIC,

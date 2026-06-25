@@ -195,7 +195,10 @@ int nkvx_front_forward_dmabuf(struct nkvx_front *front, const nkvx_exec_in_t *in
  * synchronously, but \p result_sink must remain valid until \p cb fires.
  *
  * The caller MUST leave \p in's bulk handles HG_BULK_NULL; this function originates
- * them. Store's large value_inline (the input-PULL analogue) is a later slice.
+ * them. For a large STORE value (in->value_len > NKVX_INLINE_MAX) the value region at
+ * \p in->value_inline is registered READ-mode as value_bulk and the executor PULLs it
+ * (the input-PULL analogue of the Exec input_bulk); \p in->value_inline must then
+ * remain valid until \p cb fires. A small value still rides inline.
  *
  * On success the RPC is in flight and \p cb fires exactly once from a later
  * nkvx_front_progress(); on a synchronous submission failure returns negative and

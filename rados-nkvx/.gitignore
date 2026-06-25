@@ -3,3 +3,4 @@
 /nkvx_unit_test
 /nkvx_kv_retrieve_test
 /nkvx_kv_verbs_test
+/nkvx_kv_store_test

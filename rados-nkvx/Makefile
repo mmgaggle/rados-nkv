@@ -142,6 +142,17 @@ $(KV_RETRIEVE_TEST): $(TARGET_DIR)/test/nkvx_kv_retrieve_test.c $(TARGET_DIR)/nk
 	$(CC) $(CFLAGS) -o $@ $(TARGET_DIR)/test/nkvx_kv_retrieve_test.c \
 	      $(TARGET_DIR)/nkvx_front_client.c $(CONTRACT) $(LDFLAGS)
 
+# Slice spdk-7sr.17.18 ("B"): the STORE round-trip driver. Stores a value of a given
+# length and retrieves it back byte-exact through the SAME nkvx_front_client.c the
+# integrated front uses; for value_len > NKVX_INLINE_MAX this exercises the zero-copy
+# value_bulk RDMA-PULL (store) and the result_sink PUSH (retrieve) against an
+# --mem-object service. Same source set as the RETRIEVE driver; no RADOS link.
+KV_STORE_TEST := nkvx_kv_store_test
+$(KV_STORE_TEST): $(TARGET_DIR)/test/nkvx_kv_store_test.c $(TARGET_DIR)/nkvx_front_client.c \
+                  $(TARGET_DIR)/nkvx_front_client.h $(CONTRACT) $(HEADER)
+	$(CC) $(CFLAGS) -o $@ $(TARGET_DIR)/test/nkvx_kv_store_test.c \
+	      $(TARGET_DIR)/nkvx_front_client.c $(CONTRACT) $(LDFLAGS)
+
 # Slice spdk-7sr.5 (S4): direct executor-verb test. Drives nkvx_executor_kv()
 # against the in-memory backend for STORE/DELETE/EXIST/LIST + SIKE/SINKE + the
 # read-only gate, no Mercury and no Ceph cluster on the data path. Links the
@@ -167,7 +178,11 @@ verbs-test: $(KV_VERBS_TEST)
 run: all
 	MERCURY_PREFIX=$(MERCURY_PREFIX) ./nkvx_service_test.sh
 
-clean:
-	rm -f $(SERVICE) $(CLIENT) $(UNIT_TEST) $(KV_RETRIEVE_TEST) $(KV_VERBS_TEST)
+# Build + run the slice-B STORE round-trip over na+sm (zero-copy value_bulk PULL).
+store-test: $(SERVICE) $(KV_STORE_TEST)
+	MERCURY_PREFIX=$(MERCURY_PREFIX) ./nkvx_kv_store_test.sh
 
-.PHONY: all test verbs-test run clean
+clean:
+	rm -f $(SERVICE) $(CLIENT) $(UNIT_TEST) $(KV_RETRIEVE_TEST) $(KV_VERBS_TEST) $(KV_STORE_TEST)
+
+.PHONY: all test verbs-test store-test run clean

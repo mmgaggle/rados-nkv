@@ -6,6 +6,9 @@
 .DS_Store
 /scratch/
 
+# Local test/scaffolding overrides (host-absolute bind-mount paths)
+/compose.verbs.yaml
+
 # Local beads issue tracker (personal; not published)
 .beads/
 CLAUDE.md
