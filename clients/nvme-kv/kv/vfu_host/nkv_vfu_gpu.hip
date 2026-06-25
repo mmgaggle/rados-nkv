@@ -471,17 +471,35 @@ gpu_retrieve_chunk(struct nvfu_dev *d, uint32_t nsid,
 	}
 	for (i = 0; i < n; i++) {
 		struct spdk_nvme_cmd *c = &cmds[i];
+		char *lane = buf + (size_t)i * SLOT;
 		uint64_t lane_iova = buf_iova + (uint64_t)i * SLOT;
+		uint16_t klp = klens[i];
+		uint32_t head_len = (uint32_t)sizeof(uint16_t) + klens[i];
+		uint32_t out_len = (uint32_t)SLOT - head_len;	/* value buffer after the head */
 		int err = 0;
+
+		/*
+		 * KV Retrieve carries the key as the in-payload [u16 key_len][key] head
+		 * (host->device), NOT the inline CDW key slots — the forwarder reads the
+		 * key from the DPTR prefix (docs/wire-format.md; same encoding the CPU
+		 * nvfu_kv_retrieve_lk and the GPU store use). Staging the key only in
+		 * CDW2/3/14/15 (nvfu_kv_set_key) left the in-payload head zeroed, so the
+		 * forwarder read key_len=0 and returned KEY_NOT_EXIST before the executor
+		 * ever ran the lookup. Stage the head here and signal long-key via
+		 * cdw11.kl=0; the value is returned at offset head_len (after the head).
+		 */
+		memcpy(lane, &klp, sizeof(klp));
+		memcpy(lane + sizeof(klp), keys[i], klens[i]);
 
 		memset(c, 0, sizeof(*c));
 		c->opc = SPDK_NVME_OPC_KV_RETRIEVE;
 		c->nsid = nsid;
-		c->cdw10_bits.kv.vsize = (uint32_t)SLOT;
-		nvfu_kv_set_key(c, keys[i], klens[i]);
+		c->cdw11_bits.kv.kl = 0;		/* long-key: real length is the u16 prefix */
+		c->cdw10_bits.kv.vsize = out_len;	/* host buffer size for the value */
 		c->cid = q->cid++;
-		/* Region-bounded SGL DPTR (a single data block cannot cross a 2 MiB
-		 * DMA region), so a >2 MiB value scatters correctly into the lane. */
+		/* Region-bounded SGL DPTR over the whole lane ([head][value]); a single
+		 * data block cannot cross a 2 MiB DMA region, so a >2 MiB value scatters
+		 * correctly into the lane. */
 		segs[i] = nvfu_sgl_set_dptr(c, lane_iova, (uint32_t)SLOT, &err);
 		if (err != 0) {
 			fprintf(stderr, "retrieve-batch SGL build failed (lane %u): %d\n", i, err);
@@ -524,6 +542,12 @@ gpu_retrieve_chunk(struct nvfu_dev *d, uint32_t nsid,
 	for (reaped = 0; reaped < n; reaped++) {
 		volatile struct spdk_nvme_cpl *cqe = &q->cq[q->cq_head];
 		uint64_t deadline = spdk_get_ticks() + 5 * spdk_get_ticks_hz();
+		/* The value is returned at offset head_len within the lane (after the
+		 * [u16 key_len][key] head), per the ratified wire format — NOT at offset
+		 * 0. CQEs complete in submission == lane order on this single in-order IO
+		 * queue, so lane index == reaped. */
+		uint32_t head_len = (uint32_t)sizeof(uint16_t) + klens[reaped];
+		uint32_t out_len = (uint32_t)SLOT - head_len;
 		uint32_t vlen;
 
 		while (cqe->status.p != q->cq_phase) {
@@ -535,10 +559,10 @@ gpu_retrieve_chunk(struct nvfu_dev *d, uint32_t nsid,
 		}
 		spdk_rmb();
 		if (cqe->status.sc == 0 && cqe->status.sct == 0) {
-			/* TRUE value length (clamped only to the lane buffer), so a
+			/* TRUE value length (clamped to the lane's value region), so a
 			 * >4 KiB value is framed at its actual size, not the slot. */
-			vlen = spdk_min(cqe->cdw0, (uint32_t)SLOT);
-			if (emit_frame(vlen, buf + (size_t)reaped * SLOT) != 0) {
+			vlen = spdk_min(cqe->cdw0, out_len);
+			if (emit_frame(vlen, buf + (size_t)reaped * SLOT + head_len) != 0) {
 				goto done;
 			}
 		} else {
