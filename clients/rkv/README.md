@@ -385,11 +385,29 @@ combinations error clearly (exit 1) rather than mistranslating:
 
 - **multi-nsid `get`** — one wavefront drives one controller IO queue; all keys
   in a `--gpu get` must share one nsid (single-nsid multi-key is supported).
-- **`store` values with NUL bytes / larger than 64 KiB** — the value is passed
-  as a single argv token; binary or large values need the CPU datapath.
+- **`store` values larger than the controller `max_io_size` (64 MiB)** — the
+  value rides a region-bounded SGL via `nkv_vfu_gpu store-file`, so binary/NUL
+  values up to `max_io_size` work; a larger value needs the CPU datapath.
 - **`exec -i` input payload** — `nkv_vfu_gpu` passes no exec input.
 
 Non-default namespaces (nsid > 1) **are** supported via `NKVX_NSID` (above).
+
+#### GPU datapath in the e2e size matrix (hard limit)
+
+For the container store/get/exec size sweep, the **validated GPU cell is
+small UTF-8 values only**; the 64 MB GPU cell is **N/A by design**:
+
+- **`--gpu exec` takes no input** (`nkv_vfu_gpu` passes none), so there is no
+  64 MB input to feed an exec — the large-value exec cell does not exist for GPU.
+- **`--gpu store`/`get`** are exercised at the small end (a short printable
+  value, byte-exact round-trip); large/binary GPU store is code-supported up to
+  `max_io_size` but is not the validated sweep target. The 64 MB *value* ladder
+  is covered by the **CPU** datapath, whose multi-hugepage retrieve relies on the
+  same single-file-hugepage env fix (bead spdk-6ar) the GPU client now also
+  applies (`nkv_vfu_gpu` `spdk_env_init`: `hugepage_single_segments=true` +
+  `unlink_hugepage=false`).
+
+So in the matrix: GPU = {small-UTF-8 store, get, exec}; 64 MB-GPU = N/A.
 
 For `exec`, the GPU binary pretty-prints the result itself (e.g.
 `... count=25` for `bytecount`, `... -> N bytes: <value>` for `identity`);
