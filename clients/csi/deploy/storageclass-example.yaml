@@ -1,0 +1,27 @@
+# Example StorageClass for a per-tenant NVMe-KV namespace on rados-nkv.
+#
+# volumeMode is intentionally omitted -> defaults to Filesystem. The driver
+# REJECTS volumeMode: Block: KV never enumerates as a kernel block device; the
+# pod always drives userspace via vfio-user / NVMe-KV. The Filesystem carrier
+# hands the pod a directory that carries a socket (non-xPU) or a vfio device
+# node (xPU), keeping the pod spec identical across nodes.
+#
+# parameters map to volumeParams (docs/csi-driver-plan.md sec.5). The
+# tenant->(pool,ns,cephx-cap) mapping lives in these params + a ConfigMap
+# (greenlight decision 2, spdk-k8s.1); see tenant-mapping-configmap.example.yaml.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: rados-nkv-kv
+provisioner: csi.rados-nkv.io
+reclaimPolicy: Delete
+# WaitForFirstConsumer is recommended once the front is a per-node DaemonSet
+# (spdk-k8s.3), so the namespace is provisioned on the node the pod lands on.
+volumeBindingMode: Immediate
+parameters:
+  computeContextSeed: "llama3-8b/fp8/mha"   # model|weights-ver|dtype|quant|attn -> namespace selection
+  isolationClass: per-tenant                 # shared | per-tenant | kata
+  transport: auto                            # auto | socket | device
+  namespaceTenancy: private                  # private | shared
+  cephxScope: tenant-a                        # -> per-tenant cephx cap template (ConfigMap)
+  executorEndpoint: "ofi+tcp://executor.rados-nkv.svc:1234"  # rados-nkvx executor NA addr

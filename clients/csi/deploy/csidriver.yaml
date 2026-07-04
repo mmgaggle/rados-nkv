@@ -1,0 +1,19 @@
+# CSIDriver object for the rados-nkv NVMe-KV-on-RADOS driver.
+#
+# attachRequired: false  -> attach is node-local (no ControllerPublishVolume);
+#                           the driver does not advertise PUBLISH_UNPUBLISH_VOLUME.
+# podInfoOnMount: true    -> the node plugin (spdk-csi.2) needs pod identity at
+#                           NodePublish to chcon the per-tenant vfio-user socket
+#                           to the pod's SCC-assigned SELinux MCS level
+#                           (greenlight decision 3, spdk-k8s.1).
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: csi.rados-nkv.io
+spec:
+  attachRequired: false
+  podInfoOnMount: true
+  fsGroupPolicy: None
+  volumeLifecycleModes:
+    - Persistent
+    - Ephemeral

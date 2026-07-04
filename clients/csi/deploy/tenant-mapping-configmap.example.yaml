@@ -1,0 +1,25 @@
+# Tenant -> (RADOS pool, ceph namespace, cephx capability template) mapping.
+#
+# Greenlight decision 2 (spdk-k8s.1, 2026-07-02): the mapping home is this
+# ConfigMap plus StorageClass/VolumeContext params -- NOT a CRD. There is a
+# documented migration path to a CRD (NkvTenant/NamespaceClass) once the mapping
+# needs typed validation, per-tenant RBAC, or a status subresource; do not build
+# the operator before the controller exists.
+#
+# NOTE: the controller (spdk-csi.1) does not yet consume this map; per-tenant
+# cephx cap scoping lands with spdk-k8s.4. The StorageClass carries cephxScope,
+# which keys into this ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rados-nkv-tenant-mapping
+  namespace: rados-nkv-system
+data:
+  tenant-a: |
+    pool: kvpool
+    cephNamespace: tenant-a
+    cephxCapTemplate: "profile rbd-read-write pool=kvpool namespace=tenant-a"
+  tenant-b: |
+    pool: kvpool
+    cephNamespace: tenant-b
+    cephxCapTemplate: "profile rbd-read-write pool=kvpool namespace=tenant-b"
