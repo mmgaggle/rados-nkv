@@ -20,6 +20,7 @@ type volumeParams struct {
 	Transport          string // auto | socket | device
 	NamespaceTenancy   string // private | shared
 	CephxScope         string
+	PvcNamespace       string // the PVC's k8s namespace (subsystem-tenancy boundary)
 	NQN                string
 	Serial             string
 	ExecutorEndpoint   string
@@ -42,7 +43,28 @@ const (
 	tenancyShared  = "shared"
 
 	defaultSerial = "SPDKKVR01"
+
+	// pvcNamespaceParam is the external-provisioner reserved parameter carrying
+	// the PVC's k8s namespace. Populate it in the StorageClass with the template
+	// value "${pvc.namespace}". It is the subsystem-tenancy boundary: the NQN is
+	// derived from it so one subsystem spans one k8s namespace
+	// (bd memory spdk-csi-subsystem-tenancy).
+	pvcNamespaceParam = "csi.storage.k8s.io/pvc/namespace"
 )
+
+// deriveNQN picks the subsystem NQN: an explicit subsystemNqn override wins;
+// otherwise, when the PVC's k8s namespace is known, the subsystem is scoped to
+// it (DefaultNQN ":" <k8s-namespace>); else the shared DefaultNQN. k8s
+// namespaces are DNS-1123 labels, safe to append to an NQN.
+func deriveNQN(p map[string]string, cfg Config) string {
+	if explicit := p["subsystemNqn"]; explicit != "" {
+		return explicit
+	}
+	if ns := p[pvcNamespaceParam]; ns != "" {
+		return cfg.DefaultNQN + ":" + ns
+	}
+	return cfg.DefaultNQN
+}
 
 func parseParams(p map[string]string, cfg Config) (volumeParams, error) {
 	vp := volumeParams{
@@ -51,7 +73,8 @@ func parseParams(p map[string]string, cfg Config) (volumeParams, error) {
 		Transport:          valueOr(p, "transport", transportAuto),
 		NamespaceTenancy:   valueOr(p, "namespaceTenancy", tenancyPrivate),
 		CephxScope:         p["cephxScope"],
-		NQN:                valueOr(p, "subsystemNqn", cfg.DefaultNQN),
+		PvcNamespace:       p[pvcNamespaceParam],
+		NQN:                deriveNQN(p, cfg),
 		Serial:             valueOr(p, "subsystemSerial", defaultSerial),
 		ExecutorEndpoint:   valueOr(p, "executorEndpoint", cfg.DefaultExecutor),
 		ReadOnly:           p["readOnly"] == "true",

@@ -31,7 +31,12 @@ func main() {
 		rpcSock  = flag.String("rpc-sock", "/var/run/spdk.sock", "rados-nkv target SPDK JSON-RPC unix socket")
 		drvName  = flag.String("drivername", driver.DefaultDriverName, "CSI driver name")
 		execEP   = flag.String("executor-endpoint", "", "default rados-nkvx executor NA address for bdev_kvrados_create (StorageClass param overrides)")
-		defNQN   = flag.String("default-nqn", driver.DefaultNQN, "default NVMe subsystem NQN when the StorageClass omits one")
+		defNQN   = flag.String("default-nqn", driver.DefaultNQN, "default NVMe subsystem NQN when the PVC k8s namespace is unknown")
+		ctrlSvc  = flag.Bool("controller-service", true, "serve the CSI controller service (run as the controller Deployment)")
+		nodeSvc  = flag.Bool("node-service", false, "serve the CSI node service (run as the node DaemonSet)")
+		muser    = flag.String("muser-root", "/var/run/muser", "root dir for per-pod vfio-user socket dirs (node service)")
+		stateDir = flag.String("state-dir", "/var/lib/rados-nkv-csi/state", "dir where NodePublish stashes teardown state (node service)")
+		reqMCS   = flag.Bool("require-mcs", true, "fail NodePublish closed if the pod's SELinux MCS level is unknown (node service)")
 		debug    = flag.Bool("debug", false, "enable debug logging")
 		showVer  = flag.Bool("version", false, "print version and exit")
 	)
@@ -49,12 +54,17 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
 
 	d, err := driver.New(driver.Config{
-		DriverName:      *drvName,
-		NodeID:          *nodeID,
-		Endpoint:        *endpoint,
-		RPCSock:         *rpcSock,
-		DefaultExecutor: *execEP,
-		DefaultNQN:      *defNQN,
+		DriverName:       *drvName,
+		NodeID:           *nodeID,
+		Endpoint:         *endpoint,
+		RPCSock:          *rpcSock,
+		DefaultExecutor:  *execEP,
+		DefaultNQN:       *defNQN,
+		MuserRoot:        *muser,
+		StateDir:         *stateDir,
+		RequireMCS:       *reqMCS,
+		EnableController: *ctrlSvc,
+		EnableNode:       *nodeSvc,
 	})
 	if err != nil {
 		slog.Error("failed to construct driver", "err", err)

@@ -1,0 +1,65 @@
+# Node plugin DaemonSet for rados-nkv-csi (bead spdk-csi.2).
+#
+# Runs one pod per node: the driver in --node-service mode + the standard
+# node-driver-registrar sidecar. On NodePublish it adds a per-pod vfio-user
+# listener on the volume's (per-k8s-namespace) subsystem via the front's
+# JSON-RPC socket, chcons it to the pod's SELinux MCS level, and bind-mounts it
+# into the pod (Bidirectional mount propagation carries the bind to the tenant).
+#
+# Privileged: needs mount(2) + SELinux relabel. The front's JSON-RPC socket and
+# the muser socket root are hostPaths shared with the per-node front (spdk-k8s.3).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rados-nkv-csi-node
+  namespace: rados-nkv-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: rados-nkv-csi-node
+  namespace: rados-nkv-system
+spec:
+  selector:
+    matchLabels: { app: rados-nkv-csi-node }
+  template:
+    metadata:
+      labels: { app: rados-nkv-csi-node }
+    spec:
+      serviceAccountName: rados-nkv-csi-node
+      hostNetwork: true
+      containers:
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.11.1
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/csi.rados-nkv.io/csi.sock
+          volumeMounts:
+            - { name: plugin-dir, mountPath: /csi }
+            - { name: registration-dir, mountPath: /registration }
+        - name: rados-nkv-csi
+          image: quay.io/mmgaggle/rados-nkv-csi:devel
+          args:
+            - --endpoint=unix:///csi/csi.sock
+            - --node-service=true
+            - --controller-service=false
+            - --nodeid=$(NODE_ID)
+            - --rpc-sock=/var/run/spdk.sock
+            - --muser-root=/var/run/muser
+            - --require-mcs=true
+          env:
+            - name: NODE_ID
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+          securityContext:
+            privileged: true            # mount(2) + chcon
+          volumeMounts:
+            - { name: plugin-dir, mountPath: /csi }
+            - { name: pods-mount-dir, mountPath: /var/lib/kubelet/pods, mountPropagation: Bidirectional }
+            - { name: muser, mountPath: /var/run/muser, mountPropagation: Bidirectional }
+            - { name: spdk-sock, mountPath: /var/run/spdk.sock }
+      volumes:
+        - { name: registration-dir, hostPath: { path: /var/lib/kubelet/plugins_registry, type: Directory } }
+        - { name: plugin-dir, hostPath: { path: /var/lib/kubelet/plugins/csi.rados-nkv.io, type: DirectoryOrCreate } }
+        - { name: pods-mount-dir, hostPath: { path: /var/lib/kubelet/pods, type: Directory } }
+        - { name: muser, hostPath: { path: /var/run/muser, type: DirectoryOrCreate } }
+        - { name: spdk-sock, hostPath: { path: /var/run/spdk.sock, type: Socket } }

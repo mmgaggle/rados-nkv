@@ -40,13 +40,27 @@ type Config struct {
 	RPCSock         string
 	DefaultExecutor string
 	DefaultNQN      string
+
+	// Node-service config.
+	MuserRoot  string // root dir for per-pod vfio-user socket dirs
+	StateDir   string // where NodePublish stashes teardown state
+	RequireMCS bool   // fail NodePublish closed if the pod's MCS level is unknown
+
+	// Which services this process serves.
+	EnableController bool
+	EnableNode       bool
 }
+
+const (
+	defaultMuserRoot = "/var/run/muser"
+	defaultStateDir  = "/var/lib/rados-nkv-csi/state"
+)
 
 // Driver wires the CSI gRPC services to an SPDK JSON-RPC client.
 type Driver struct {
 	cfg Config
 	srv *grpc.Server
-	rpc spdkrpc.RPC
+	rpc *spdkrpc.Client
 }
 
 // New constructs a Driver from cfg.
@@ -57,8 +71,17 @@ func New(cfg Config) (*Driver, error) {
 	if cfg.DefaultNQN == "" {
 		cfg.DefaultNQN = DefaultNQN
 	}
+	if cfg.MuserRoot == "" {
+		cfg.MuserRoot = defaultMuserRoot
+	}
+	if cfg.StateDir == "" {
+		cfg.StateDir = defaultStateDir
+	}
 	if cfg.RPCSock == "" {
 		return nil, fmt.Errorf("rpc-sock is required")
+	}
+	if !cfg.EnableController && !cfg.EnableNode {
+		return nil, fmt.Errorf("at least one of the controller or node service must be enabled")
 	}
 	return &Driver{
 		cfg: cfg,
@@ -84,7 +107,12 @@ func (d *Driver) Run(ctx context.Context) error {
 
 	d.srv = grpc.NewServer(grpc.UnaryInterceptor(logInterceptor))
 	csi.RegisterIdentityServer(d.srv, &identityServer{cfg: d.cfg})
-	csi.RegisterControllerServer(d.srv, newControllerServer(d.cfg, d.rpc))
+	if d.cfg.EnableController {
+		csi.RegisterControllerServer(d.srv, newControllerServer(d.cfg, d.rpc))
+	}
+	if d.cfg.EnableNode {
+		csi.RegisterNodeServer(d.srv, newNodeServer(d.cfg, d.rpc, hostOps{}))
+	}
 
 	go func() {
 		<-ctx.Done()

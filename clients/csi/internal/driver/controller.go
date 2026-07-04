@@ -160,6 +160,7 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		"transport":          params.Transport,
 		"namespaceTenancy":   params.NamespaceTenancy,
 		"cephxScope":         params.CephxScope,
+		"k8sNamespace":       params.PvcNamespace,
 		"quotaBytes":         strconv.FormatInt(quota, 10),
 	}
 

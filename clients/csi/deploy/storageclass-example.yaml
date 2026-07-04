@@ -19,9 +19,14 @@ reclaimPolicy: Delete
 # (spdk-k8s.3), so the namespace is provisioned on the node the pod lands on.
 volumeBindingMode: Immediate
 parameters:
+  # Subsystem-tenancy: the NVMe subsystem is scoped to the PVC's k8s namespace
+  # (bd memory spdk-csi-subsystem-tenancy). external-provisioner substitutes the
+  # template below with the real namespace, and the controller derives the NQN
+  # from it. Omit to fall back to a single shared subsystem.
+  csi.storage.k8s.io/pvc/namespace: "${pvc.namespace}"
   computeContextSeed: "llama3-8b/fp8/mha"   # model|weights-ver|dtype|quant|attn -> namespace selection
   isolationClass: per-tenant                 # shared | per-tenant | kata
   transport: auto                            # auto | socket | device
   namespaceTenancy: private                  # private | shared
   cephxScope: tenant-a                        # -> per-tenant cephx cap template (ConfigMap)
-  executorEndpoint: "ofi+tcp://executor.rados-nkv.svc:1234"  # rados-nkvx executor NA addr
+  executorEndpoint: "na+sm://"                # rados-nkvx executor NA addr (na+sm same-host; ofi+verbs cross-host)

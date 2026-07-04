@@ -240,6 +240,48 @@ func TestCreateVolume_AddNsExistsRecoversNSID(t *testing.T) {
 	}
 }
 
+func TestCreateVolume_PerNamespaceNQN(t *testing.T) {
+	f := newFakeRPC()
+	cs := newControllerServer(testConfig(), f)
+	resp, err := cs.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-tenant-a",
+		VolumeCapabilities: mountCaps(),
+		Parameters:         map[string]string{"csi.storage.k8s.io/pvc/namespace": "team-alpha"},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	want := DefaultNQN + ":team-alpha"
+	h, _ := decodeVolumeID(resp.GetVolume().GetVolumeId())
+	if h.NQN != want {
+		t.Errorf("NQN: got %q want %q", h.NQN, want)
+	}
+	if f.nqn != want {
+		t.Errorf("subsystem created under wrong NQN: got %q want %q", f.nqn, want)
+	}
+	if resp.GetVolume().GetVolumeContext()["k8sNamespace"] != "team-alpha" {
+		t.Errorf("k8sNamespace missing from volume context")
+	}
+}
+
+func TestDeriveNQN(t *testing.T) {
+	cfg := testConfig()
+	cases := []struct {
+		name string
+		p    map[string]string
+		want string
+	}{
+		{"explicit override wins", map[string]string{"subsystemNqn": "nqn.custom", pvcNamespaceParam: "ns"}, "nqn.custom"},
+		{"per-namespace", map[string]string{pvcNamespaceParam: "team-b"}, DefaultNQN + ":team-b"},
+		{"fallback to default", map[string]string{}, DefaultNQN},
+	}
+	for _, tc := range cases {
+		if got := deriveNQN(tc.p, cfg); got != tc.want {
+			t.Errorf("%s: deriveNQN=%q want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestDeleteVolume_HappyPath(t *testing.T) {
 	f := newFakeRPC()
 	cs := newControllerServer(testConfig(), f)
