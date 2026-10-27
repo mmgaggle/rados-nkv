@@ -59,7 +59,17 @@ nkvx_env_init_once(void)
 	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
 	opts.name = "rados-nkv";
-	opts.env_context = (void *)"--iova-mode=va";
+	/* NOTE: no explicit --iova-mode here. SPDK's env_dpdk auto-selects
+	 * va/pa based on the host IOMMU (and pushes its own --iova-mode when
+	 * no IOMMU is present); hardcoding va here collides with that on
+	 * IOMMU-less hosts ("--iova-mode should not occur multiple times").
+	 * Run no-huge (512 MiB cap) so the client works in containers without
+	 * /dev/hugepages — vfio-user DMA only needs the small bounce area.
+	 * mem_size must be set as an env opt (SPDK validates opts.mem_size
+	 * itself when no-huge; a bare -s in env_context is not enough). */
+	opts.no_huge = 1;
+	opts.mem_size = 512;
+	opts.env_context = NULL;
 	if (spdk_env_init(&opts) < 0) {
 		fprintf(stderr, "Unable to initialize SPDK env\n");
 		return -EIO;

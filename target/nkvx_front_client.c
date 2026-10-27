@@ -250,12 +250,24 @@ nkvx_bulk_acquire_dmabuf(struct nkvx_front *front, void *result_sink,
 			 hg_size_t len, int dmabuf_fd, uint64_t dmabuf_offset,
 			 hg_bulk_t *out)
 {
+#ifdef NKVX_MERCURY_DMABUF_ATTR
 	struct hg_bulk_attr attr = {
 		.mem_type = HG_MEM_TYPE_HOST,	/* a dma-buf BAR/udmabuf is host-iface */
 		.device = 0,
 		.dmabuf_fd = dmabuf_fd,
 		.dmabuf_offset = dmabuf_offset,
 	};
+#else
+	/* Upstream Mercury has no dmabuf bulk attrs: register the sink as plain
+	 * HOST memory. CPU clients are unaffected; the GPU dma-buf fast path
+	 * needs a Mercury with the dmabuf patch (NKVX_MERCURY_DMABUF_ATTR=1). */
+	struct hg_bulk_attr attr = {
+		.mem_type = HG_MEM_TYPE_HOST,
+		.device = 0,
+	};
+	(void)dmabuf_fd;
+	(void)dmabuf_offset;
+#endif
 	void *base = result_sink;
 	hg_bulk_t h;
 	hg_return_t ret;

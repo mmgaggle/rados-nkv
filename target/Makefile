@@ -48,6 +48,13 @@ CC ?= cc
 
 CFLAGS += -std=gnu11 -fPIC -g -Wall
 CFLAGS += -DNKVX_WITH_MERCURY
+# Mercury dmabuf bulk attrs (hg_bulk_attr.dmabuf_fd/.dmabuf_offset) are a
+# patched-Mercury feature, not in upstream v2.4.x. Default OFF (upstream);
+# against a Mercury with the dmabuf patch build with NKVX_MERCURY_DMABUF_ATTR=1
+# to keep the GPU dma-buf fast path.
+ifeq ($(NKVX_MERCURY_DMABUF_ATTR),1)
+CFLAGS += -DNKVX_MERCURY_DMABUF_ATTR
+endif
 CFLAGS += -I$(SPDK_HEADER_DIR)
 CFLAGS += -I$(SPDK_BUILD_HEADER_DIR)
 CFLAGS += -I$(TARGET_INC_DIR)
