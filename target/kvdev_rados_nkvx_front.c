@@ -264,19 +264,29 @@ kvdev_rados_nkvx_front_forward_dmabuf(struct nkvx_front *front,
 }
 
 int
-kvdev_rados_nkvx_front_retrieve(struct nkvx_front *front,
-				const void *key, uint8_t key_len,
-				bool read_only,
-				void *output_buf, uint32_t output_buf_len,
-				spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+kvdev_rados_nkvx_front_retrieve_segs(struct nkvx_front *front,
+				     const void *key, uint8_t key_len,
+				     bool read_only,
+				     const struct kvdev_rados_front_seg *segs,
+				     unsigned nsegs,
+				     spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
 {
 	struct kvdev_rados_nkvx_fwd_ctx *ctx;
 	nkvx_kv_in_t in;
+	struct nkvx_front_kv_sink_seg ksegs[NKVX_FRONT_KV_SINK_MAX_SEGS];
+	uint32_t sink_total = 0;
+	unsigned i;
 	int rc;
 
 	/* key_len is uint8_t and SPDK_KVDEV_EXEC_KEY_MAX_LEN == 255, so it cannot
 	 * exceed the cap; only the empty-key case is invalid for Retrieve. */
 	if (front == NULL || cb_fn == NULL || key_len == 0) {
+		return -EINVAL;
+	}
+	if (nsegs > 0 && segs == NULL) {
+		return -EINVAL;
+	}
+	if (nsegs > NKVX_FRONT_KV_SINK_MAX_SEGS) {
 		return -EINVAL;
 	}
 
@@ -286,32 +296,59 @@ kvdev_rados_nkvx_front_retrieve(struct nkvx_front *front,
 	}
 	ctx->cb_fn = cb_fn;
 	ctx->cb_arg = cb_arg;
-	ctx->host_out = output_buf;
-	ctx->host_out_len = output_buf_len;
+	/* Inline (small-value) delivery copies into the FIRST segment: the executor
+	 * only inlines values <= NKVX_INLINE_MAX, which fits the first segment
+	 * whenever the sink is multi-segment (total > INLINE_MAX then). A single-
+	 * segment sink smaller than the value is the BUFFER_TOO_SMALL contract. */
+	ctx->host_out = (nsegs > 0) ? segs[0].base : NULL;
+	ctx->host_out_len = (nsegs > 0) ? segs[0].len : 0;
 
 	memset(&in, 0, sizeof(in));
 	in.verb = NKVX_KV_VERB_RETRIEVE;
 	in.read_only = read_only ? 1 : 0;
 	in.key_len = key_len;
 	memcpy(in.key, key, key_len);
-	in.osize = output_buf_len;
+	for (i = 0; i < nsegs; i++) {
+		ksegs[i].base = segs[i].base;
+		ksegs[i].len = segs[i].len;
+		sink_total += segs[i].len;
+	}
+	in.osize = sink_total;
 	in.value_inline = NULL;			/* no STORE value on a Retrieve */
 	in.value_bulk = HG_BULK_NULL;		/* originated by the forward */
 	in.result_sink = HG_BULK_NULL;		/* originated by the forward */
 
 	/*
-	 * Pass the tenant host output buffer as the result sink (S3): a large value
-	 * (> NKVX_INLINE_MAX) is PUSHed straight into it; a small value comes back
-	 * inline and kvdev_rados_nkvx_front_done copies it into host_out. Same single
-	 * buffer either way — the executor inlines XOR pushes (no double delivery).
+	 * Pass the tenant host output space as the result sink (S3): a large value
+	 * (> NKVX_INLINE_MAX) is PUSHed straight into the segments; a small value
+	 * comes back inline and kvdev_rados_nkvx_front_done copies it into the first
+	 * segment. Same single buffer space either way — the executor inlines XOR
+	 * pushes (no double delivery).
 	 */
-	rc = nkvx_front_kv_forward(front, &in, output_buf, output_buf_len,
+	rc = nkvx_front_kv_forward(front, &in, ksegs, nsegs,
 				   kvdev_rados_nkvx_front_done, ctx);
 	if (rc != 0) {
 		free(ctx);
 		return rc;
 	}
 	return 0;
+}
+
+int
+kvdev_rados_nkvx_front_retrieve(struct nkvx_front *front,
+				const void *key, uint8_t key_len,
+				bool read_only,
+				void *output_buf, uint32_t output_buf_len,
+				spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct kvdev_rados_front_seg seg;
+
+	seg.base = output_buf;
+	seg.len = output_buf_len;
+	return kvdev_rados_nkvx_front_retrieve_segs(front, key, key_len, read_only,
+						    (output_buf != NULL) ? &seg : NULL,
+						    (output_buf != NULL) ? 1 : 0,
+						    cb_fn, cb_arg);
 }
 
 int
@@ -425,17 +462,27 @@ kvdev_rados_nkvx_front_exist(struct nkvx_front *front,
 }
 
 int
-kvdev_rados_nkvx_front_list(struct nkvx_front *front,
-			    const void *start_key, uint8_t start_key_len,
-			    bool read_only,
-			    void *output_buf, uint32_t output_buf_len,
-			    spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+kvdev_rados_nkvx_front_list_segs(struct nkvx_front *front,
+				 const void *start_key, uint8_t start_key_len,
+				 bool read_only,
+				 const struct kvdev_rados_front_seg *segs,
+				 unsigned nsegs,
+				 spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
 {
 	struct kvdev_rados_nkvx_fwd_ctx *ctx;
 	nkvx_kv_in_t in;
+	struct nkvx_front_kv_sink_seg ksegs[NKVX_FRONT_KV_SINK_MAX_SEGS];
+	uint32_t sink_total = 0;
+	unsigned i;
 	int rc;
 
 	if (front == NULL || cb_fn == NULL) {
+		return -EINVAL;
+	}
+	if (nsegs > 0 && segs == NULL) {
+		return -EINVAL;
+	}
+	if (nsegs > NKVX_FRONT_KV_SINK_MAX_SEGS) {
 		return -EINVAL;
 	}
 
@@ -445,8 +492,8 @@ kvdev_rados_nkvx_front_list(struct nkvx_front *front,
 	}
 	ctx->cb_fn = cb_fn;
 	ctx->cb_arg = cb_arg;
-	ctx->host_out = output_buf;
-	ctx->host_out_len = output_buf_len;
+	ctx->host_out = (nsegs > 0) ? segs[0].base : NULL;
+	ctx->host_out_len = (nsegs > 0) ? segs[0].len : 0;
 
 	memset(&in, 0, sizeof(in));
 	in.verb = NKVX_KV_VERB_LIST;
@@ -455,19 +502,42 @@ kvdev_rados_nkvx_front_list(struct nkvx_front *front,
 	if (start_key_len > 0) {
 		memcpy(in.key, start_key, start_key_len);
 	}
-	in.osize = output_buf_len;
+	for (i = 0; i < nsegs; i++) {
+		ksegs[i].base = segs[i].base;
+		ksegs[i].len = segs[i].len;
+		sink_total += segs[i].len;
+	}
+	in.osize = sink_total;
 	in.value_inline = NULL;
 	in.value_bulk = HG_BULK_NULL;
 	in.result_sink = HG_BULK_NULL;
 
-	/* Same inline-or-PUSH delivery as Retrieve: the listing lands in output_buf. */
-	rc = nkvx_front_kv_forward(front, &in, output_buf, output_buf_len,
+	/* Same inline-or-PUSH delivery as Retrieve: the listing lands in the sink. */
+	rc = nkvx_front_kv_forward(front, &in, ksegs, nsegs,
 				   kvdev_rados_nkvx_front_done, ctx);
 	if (rc != 0) {
 		free(ctx);
 		return rc;
 	}
 	return 0;
+}
+
+int
+kvdev_rados_nkvx_front_list(struct nkvx_front *front,
+			    const void *start_key, uint8_t start_key_len,
+			    bool read_only,
+			    void *output_buf, uint32_t output_buf_len,
+			    spdk_kvdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct kvdev_rados_front_seg seg;
+
+	seg.base = output_buf;
+	seg.len = output_buf_len;
+	return kvdev_rados_nkvx_front_list_segs(front, start_key, start_key_len,
+						read_only,
+						(output_buf != NULL) ? &seg : NULL,
+						(output_buf != NULL) ? 1 : 0,
+						cb_fn, cb_arg);
 }
 
 bool

@@ -148,6 +148,53 @@ int kvdev_rados_nkvx_front_forward_dmabuf(struct nkvx_front *front,
  * must remain valid until \p cb_fn fires. On a synchronous failure returns negative
  * and \p cb_fn is NOT called.
  */
+/**
+ * Result-sink scatter segment for RETRIEVE/LIST (no Mercury dependency — the
+ * bdev gathers the tenant DPTR's SGL segments past the in-payload key header).
+ * Segments form one logically contiguous output space; the executor PUSHes into
+ * [0, sink_total) of it.
+ */
+struct kvdev_rados_front_seg {
+	void *base;
+	uint32_t len;
+};
+
+/**
+ * Forward ONE base-layer KV RETRIEVE to the remote executor (slice spdk-7sr.4 / S3)
+ * over the additive `nkvx_kv` RPC. The front (bdev_kvrados) owns no librados; the
+ * executor resolves oid=hex(key), serves the value from the shared TB4 cache, and
+ * returns it inline (small) or PUSHes it into the sink (large).
+ *
+ *   \p key/\p key_len   the object key (ADR-0014: parsed from the in-payload header
+ *                       by the bdev; 1..255 bytes).
+ *   \p read_only        the per-namespace read-only bit, carried on the wire
+ *                       (ADR-0008); Retrieve is non-mutating so it is always allowed.
+ *   \p segs/\p nsegs    the tenant host output buffer (DPTR) as a scatter list; the
+ *                       executor sees osize = sum(seg len). Multi-segment sinks are
+ *                       the FIX for large values whose DPTR spans multiple vfio-user
+ *                       DMA regions: the executor PUSHes in full instead of answering
+ *                       BUFFER_TOO_SMALL for a value the sink actually holds.
+ *
+ * On success (return 0) the RPC is in flight and \p cb_fn fires exactly once from a
+ * later progress tick: up to \p sink_total bytes of the value land in the segments
+ * (inline-copied by the bridge or PUSHed by the executor), then
+ * cb_fn(cb_arg, status, TRUE_value_len) runs (DW0 = the true value length;
+ * BUFFER_TOO_SMALL when it exceeds osize, KEY_NOT_EXIST when absent). The segments
+ * must remain valid until \p cb_fn fires. On a synchronous failure returns negative
+ * and \p cb_fn is NOT called.
+ */
+int kvdev_rados_nkvx_front_retrieve_segs(struct nkvx_front *front,
+					 const void *key, uint8_t key_len,
+					 bool read_only,
+					 const struct kvdev_rados_front_seg *segs,
+					 unsigned nsegs,
+					 spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
+
+/**
+ * Single-contiguous-buffer variant of kvdev_rados_nkvx_front_retrieve_segs()
+ * (kept for callers that own one contiguous DPTR): wraps the buffer as one
+ * segment.
+ */
 int kvdev_rados_nkvx_front_retrieve(struct nkvx_front *front,
 				    const void *key, uint8_t key_len,
 				    bool read_only,
@@ -199,6 +246,16 @@ int kvdev_rados_nkvx_front_exist(struct nkvx_front *front,
  * BUFFER_TOO_SMALL when the full listing exceeds osize (DW0 = true length).
  * \p output_buf must remain valid until cb_fn fires. Synchronous failure: negative,
  * no cb_fn.
+ */
+int kvdev_rados_nkvx_front_list_segs(struct nkvx_front *front,
+				     const void *start_key, uint8_t start_key_len,
+				     bool read_only,
+				     const struct kvdev_rados_front_seg *segs,
+				     unsigned nsegs,
+				     spdk_kvdev_io_completion_cb cb_fn, void *cb_arg);
+
+/**
+ * Single-contiguous-buffer variant of kvdev_rados_nkvx_front_list_segs().
  */
 int kvdev_rados_nkvx_front_list(struct nkvx_front *front,
 				const void *start_key, uint8_t start_key_len,

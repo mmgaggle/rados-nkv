@@ -185,6 +185,23 @@ int nkvx_front_forward_dmabuf(struct nkvx_front *front, const nkvx_exec_in_t *in
 			      uint64_t *out_token);
 
 /**
+ * Result-sink scatter segment (KV RETRIEVE/LIST). The tenant DPTR may span
+ * multiple vfio-user DMA regions (the client's SGL splits the value buffer at
+ * NVFU_DMA_REGION boundaries), so the PUSH sink is registered as a multi-segment
+ * HG_Bulk handle. The segments are a LOGICALLY CONTIGUOUS output space in SGL
+ * order; the executor PUSHes into [0, osize) of that space.
+ */
+struct nkvx_front_kv_sink_seg {
+	void *base;		/* segment base VA (must stay valid until cb) */
+	uint32_t len;		/* segment byte length */
+};
+
+/** Max result-sink segments per KV forward (the bdev's gather cap is far lower;
+ *  a 64MiB DPTR of 2MiB regions needs 33 — raised headroom, stack arrays sized
+ *  by this live in the forward path). */
+#define NKVX_FRONT_KV_SINK_MAX_SEGS 64
+
+/**
  * Forward ONE base-layer KV verb (slice spdk-7sr.4 / S3) over the additive
  * `nkvx_kv` RPC. S3 wires RETRIEVE: \p in carries the verb, key, read_only, and
  * osize; \p result_sink is the tenant host output buffer (DPTR). When the value
@@ -200,6 +217,13 @@ int nkvx_front_forward_dmabuf(struct nkvx_front *front, const nkvx_exec_in_t *in
  * (the input-PULL analogue of the Exec input_bulk); \p in->value_inline must then
  * remain valid until \p cb fires. A small value still rides inline.
  *
+ * The result sink is a scatter list of \p sink_nsegs segments (logical total =
+ * sum of seg lens; MUST equal in->osize). A NULL/0 sink (STORE/DELETE/EXIST)
+ * registers nothing. Multi-segment sinks (> NKVX_INLINE_MAX total) register one
+ * WRITE-mode HG_Bulk with all segments so large values spanning multiple
+ * vfio-user DMA regions PUSH in full (fixes the single-segment sink truncation
+ * that surfaced as BUFFER_TOO_SMALL on >1.8MiB retrieves).
+ *
  * On success the RPC is in flight and \p cb fires exactly once from a later
  * nkvx_front_progress(); on a synchronous submission failure returns negative and
  * \p cb is NOT called.
@@ -207,7 +231,8 @@ int nkvx_front_forward_dmabuf(struct nkvx_front *front, const nkvx_exec_in_t *in
  * \return 0 if submitted; negative errno-style otherwise.
  */
 int nkvx_front_kv_forward(struct nkvx_front *front, const nkvx_kv_in_t *in,
-			  void *result_sink, uint32_t result_sink_len,
+			  const struct nkvx_front_kv_sink_seg *sink_segs,
+			  unsigned sink_nsegs,
 			  nkvx_front_done_cb cb, void *arg);
 
 /** Sentinel "no call" cancel token (a valid token is always nonzero). */

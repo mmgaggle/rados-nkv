@@ -34,6 +34,13 @@
 #define KVRADOS_DEFAULT_MAX_VALUE_SIZE			(128 * 1024)
 #define KVRADOS_DEFAULT_OPTIMAL_VALUE_GRANULARITY	4096
 
+/* Max result-sink segments gathered for RETRIEVE/LIST (the tenant DPTR spans one
+ * vfio-user DMA region per 2MiB of the client's value SGL; a 64MiB DPTR needs
+ * 33 — 64 leaves headroom and matches the front's NKVX_FRONT_KV_SINK_MAX_SEGS
+ * accept limit). Exceeding it truncates the sink; the executor then answers
+ * BUFFER_TOO_SMALL and the client re-reads (safe degradation). */
+#define KVRADOS_FRONT_SINK_MAX_SEGS			64
+
 /*
  * ADR-0014 in-payload key encoding: keys ride at the head of the DPTR/SGL payload
  * as [u16 key_len][key bytes][value...], NOT in the inline CDW2/3/14/15 slots. The
@@ -787,8 +794,6 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 		{
 			struct kvrados_channel *kch = spdk_io_channel_get_ctx(ioch);
 			struct kvrados_kv_io_ctx *kctx;
-			void *out_buf;
-			uint32_t out_len;
 			bool ro = kvrados->read_only;
 			int frc;
 
@@ -807,57 +812,67 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 			 * offset value_off. The client may carry the key head EITHER inline in
 			 * iov[0] before the value (single contiguous DPTR) OR as its own SGL
 			 * segment, in which case value_off lands at the head of a later iov (the
-			 * value stays a separate, VRAM/p2pdma-capable region). Walk the SGL to
-			 * the iov holding value_off and hand the bridge that contiguous span as
-			 * the result sink (zero-copy / PUSH for large values; a small value comes
-			 * back inline and the bridge copies it in).
+			 * value stays a separate, VRAM/p2pdma-capable region). Gather ALL the
+			 * segments from value_off to the end of the payload as the result sink:
+			 * the tenant DPTR legitimately spans multiple vfio-user DMA regions
+			 * (the client's value SGL splits at NVFU_DMA_REGION boundaries), and
+			 * registering only the FIRST segment shrank osize below the true value
+			 * length — the executor answered BUFFER_TOO_SMALL for a value the sink
+			 * actually held (observed: 2MiB retrieves failing with osize=1925120
+			 * while result_len=2097152). The executor PUSHes into the full
+			 * multi-segment space; small values come back inline.
 			 */
-			out_buf = NULL;
-			out_len = 0;
 			{
+				struct kvdev_rados_front_seg segs[KVRADOS_FRONT_SINK_MAX_SEGS];
+				unsigned nsegs = 0;
 				uint64_t io_off = 0;
+				uint32_t sink_total = 0;
 				int j;
 
-				for (j = 0; j < iovcnt; j++) {
-					if (value_off < io_off + iovs[j].iov_len) {
-						uint64_t in_iov = value_off - io_off;
+				for (j = 0; j < iovcnt && nsegs < KVRADOS_FRONT_SINK_MAX_SEGS; j++) {
+					uint64_t in_iov;
 
-						out_buf = (uint8_t *)iovs[j].iov_base + in_iov;
-						out_len = (uint32_t)spdk_min(iovs[j].iov_len - in_iov,
-									     (uint64_t)UINT32_MAX);
-						break;
+					if (value_off >= io_off + iovs[j].iov_len) {
+						io_off += iovs[j].iov_len;
+						continue;	/* still before the value */
 					}
+					in_iov = (value_off > io_off) ? value_off - io_off : 0;
+					segs[nsegs].base = (uint8_t *)iovs[j].iov_base + in_iov;
+					segs[nsegs].len = (uint32_t)(iovs[j].iov_len - in_iov);
+					sink_total += segs[nsegs].len;
+					nsegs++;
 					io_off += iovs[j].iov_len;
 				}
-			}
 
-			kctx = calloc(1, sizeof(*kctx));
-			if (kctx == NULL) {
-				spdk_bdev_io_complete_nvme_status(bdev_io, 0,
-								  SPDK_NVME_SCT_GENERIC,
-								  SPDK_NVME_SC_INTERNAL_DEVICE_ERROR);
+				kctx = calloc(1, sizeof(*kctx));
+				if (kctx == NULL) {
+					spdk_bdev_io_complete_nvme_status(bdev_io, 0,
+									  SPDK_NVME_SCT_GENERIC,
+									  SPDK_NVME_SC_INTERNAL_DEVICE_ERROR);
+					return;
+				}
+				kctx->bdev_io = bdev_io;
+
+				SPDK_DEBUGLOG(bdev_kvrados,
+					      "%s: KV RETRIEVE key_len=%u iovcnt=%d payload=%" PRIu64
+					      " value_off=%" PRIu64 " nsegs=%u osize=%u ro=%d\n",
+					      kvrados->disk.name, key_len, iovcnt, payload_len,
+					      value_off, nsegs, sink_total, ro);
+
+				frc = kvdev_rados_nkvx_front_retrieve_segs(kch->front, key,
+									      (uint8_t)key_len,
+									      ro, segs, nsegs,
+									      kvrados_retrieve_done, kctx);
+				if (frc != 0) {
+					SPDK_ERRLOG("%s: KV RETRIEVE forward failed: %d\n",
+						    kvrados->disk.name, frc);
+					free(kctx);
+					spdk_bdev_io_complete_nvme_status(bdev_io, 0,
+									  SPDK_NVME_SCT_GENERIC,
+									  SPDK_NVME_SC_INTERNAL_DEVICE_ERROR);
+				}
 				return;
 			}
-			kctx->bdev_io = bdev_io;
-
-			SPDK_DEBUGLOG(bdev_kvrados,
-				      "%s: KV RETRIEVE key_len=%u iovcnt=%d payload=%" PRIu64
-				      " value_off=%" PRIu64 " osize=%u ro=%d\n",
-				      kvrados->disk.name, key_len, iovcnt, payload_len,
-				      value_off, out_len, ro);
-
-			frc = kvdev_rados_nkvx_front_retrieve(kch->front, key, (uint8_t)key_len,
-							      ro, out_buf, out_len,
-							      kvrados_retrieve_done, kctx);
-			if (frc != 0) {
-				SPDK_ERRLOG("%s: KV RETRIEVE forward failed: %d\n",
-					    kvrados->disk.name, frc);
-				free(kctx);
-				spdk_bdev_io_complete_nvme_status(bdev_io, 0,
-								  SPDK_NVME_SCT_GENERIC,
-								  SPDK_NVME_SC_INTERNAL_DEVICE_ERROR);
-			}
-			return;
 		}
 #else
 		/* Built --without-mercury: the forwarder has no transport to the executor. */
@@ -1068,9 +1083,11 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 		{
 			struct kvrados_channel *kch = spdk_io_channel_get_ctx(ioch);
 			struct kvrados_kv_io_ctx *kctx;
-			void *out_buf;
-			uint32_t out_len;
 			uint8_t start_len = (uint8_t)spdk_min((uint64_t)key_len, (uint64_t)UINT8_MAX);
+			struct kvdev_rados_front_seg segs[KVRADOS_FRONT_SINK_MAX_SEGS];
+			unsigned nsegs = 0;
+			uint32_t sink_total = 0;
+			int j;
 			int frc;
 
 			if (kch->front == NULL) {
@@ -1086,14 +1103,15 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 			 * LIST has no in-payload key header to skip — the whole DPTR is the
 			 * output buffer for the NRK-prefixed listing. The start position (if
 			 * any) rides in the key header like the other verbs; key_len==0 lists
-			 * from the first key. The listing lands in the host buffer (iov[0]).
+			 * from the first key. Gather ALL iovs as the sink (the DPTR may span
+			 * multiple vfio-user DMA regions — same rationale as RETRIEVE).
 			 */
-			if (iovcnt >= 1) {
-				out_buf = iovs[0].iov_base;
-				out_len = (uint32_t)spdk_min(iovs[0].iov_len, (uint64_t)UINT32_MAX);
-			} else {
-				out_buf = NULL;
-				out_len = 0;
+			for (j = 0; j < iovcnt && nsegs < KVRADOS_FRONT_SINK_MAX_SEGS; j++) {
+				segs[nsegs].base = iovs[j].iov_base;
+				segs[nsegs].len = (uint32_t)spdk_min(iovs[j].iov_len,
+								     (uint64_t)UINT32_MAX);
+				sink_total += segs[nsegs].len;
+				nsegs++;
 			}
 
 			kctx = calloc(1, sizeof(*kctx));
@@ -1106,12 +1124,13 @@ kvrados_handle_kv_io(struct kvrados_disk *kvrados, struct spdk_io_channel *ioch,
 			kctx->bdev_io = bdev_io;
 
 			SPDK_DEBUGLOG(bdev_kvrados,
-				      "%s: KV LIST start_key_len=%u osize=%u\n",
-				      kvrados->disk.name, start_len, out_len);
+				      "%s: KV LIST start_key_len=%u nsegs=%u osize=%u\n",
+				      kvrados->disk.name, start_len, nsegs, sink_total);
 
-			frc = kvdev_rados_nkvx_front_list(kch->front, key, start_len,
-							  kvrados->read_only, out_buf, out_len,
-							  kvrados_retrieve_done, kctx);
+			frc = kvdev_rados_nkvx_front_list_segs(kch->front, key, start_len,
+							       kvrados->read_only,
+							       segs, nsegs,
+							       kvrados_retrieve_done, kctx);
 			if (frc != 0) {
 				SPDK_ERRLOG("%s: KV LIST forward failed: %d\n",
 					    kvrados->disk.name, frc);

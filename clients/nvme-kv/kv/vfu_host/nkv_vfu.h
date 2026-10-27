@@ -138,7 +138,10 @@ nvfu_submit_poll(struct nvfu_dev *d, struct nvfu_queue *q,
 	q->sq_tail = new_tail;
 
 	cqe = &q->cq[q->cq_head];
-	deadline = spdk_get_ticks() + 5 * spdk_get_ticks_hz();
+	/* 5s was too tight for a cold forwarder->executor Mercury connect
+	 * (first RPC pays the connection setup + executor-side RADOS latency);
+	 * 30s keeps warm-path latency unchanged. */
+	deadline = spdk_get_ticks() + 30 * spdk_get_ticks_hz();
 	while (cqe->status.p != q->cq_phase) {
 		if (spdk_get_ticks() > deadline) {
 			fprintf(stderr, "qid:%u opc=0x%x TIMEOUT\n", q->qid, cmd->opc);

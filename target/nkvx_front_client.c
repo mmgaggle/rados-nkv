@@ -250,12 +250,24 @@ nkvx_bulk_acquire_dmabuf(struct nkvx_front *front, void *result_sink,
 			 hg_size_t len, int dmabuf_fd, uint64_t dmabuf_offset,
 			 hg_bulk_t *out)
 {
+#ifdef NKVX_MERCURY_DMABUF_ATTR
 	struct hg_bulk_attr attr = {
 		.mem_type = HG_MEM_TYPE_HOST,	/* a dma-buf BAR/udmabuf is host-iface */
 		.device = 0,
 		.dmabuf_fd = dmabuf_fd,
 		.dmabuf_offset = dmabuf_offset,
 	};
+#else
+	/* Upstream Mercury has no dmabuf bulk attrs: register the sink as plain
+	 * HOST memory. CPU clients are unaffected; the GPU dma-buf fast path
+	 * needs a Mercury with the dmabuf patch (NKVX_MERCURY_DMABUF_ATTR=1). */
+	struct hg_bulk_attr attr = {
+		.mem_type = HG_MEM_TYPE_HOST,
+		.device = 0,
+	};
+	(void)dmabuf_fd;
+	(void)dmabuf_offset;
+#endif
 	void *base = result_sink;
 	hg_bulk_t h;
 	hg_return_t ret;
@@ -907,7 +919,8 @@ out:
 
 int
 nkvx_front_kv_forward(struct nkvx_front *front, const nkvx_kv_in_t *in,
-		      void *result_sink, uint32_t result_sink_len,
+		      const struct nkvx_front_kv_sink_seg *sink_segs,
+		      unsigned sink_nsegs,
 		      nkvx_front_done_cb cb, void *arg)
 {
 	struct nkvx_kv_call *call;
@@ -916,6 +929,9 @@ nkvx_front_kv_forward(struct nkvx_front *front, const nkvx_kv_in_t *in,
 	hg_return_t ret;
 
 	if (front == NULL || in == NULL || cb == NULL) {
+		return -EINVAL;
+	}
+	if (sink_nsegs > 0 && sink_segs == NULL) {
 		return -EINVAL;
 	}
 
@@ -965,28 +981,53 @@ nkvx_front_kv_forward(struct nkvx_front *front, const nkvx_kv_in_t *in,
 		local.value_bulk = call->value_bulk;
 	}
 
-	/* Register the host output buffer WRITE-mode when it can hold a large value so
+	/* Register the tenant output space WRITE-mode when it can hold a large value so
 	 * the executor PUSHes straight into it (Retrieve/List). A small value returns
-	 * inline. Like the STORE value_bulk above, this MUST bypass the C7.2 handle
+	 * inline. The sink is a SCATTER LIST: the tenant DPTR may span multiple
+	 * vfio-user DMA regions (the client's value SGL splits at NVFU_DMA_REGION
+	 * boundaries), so ALL segments must be registered — registering only the first
+	 * segment shrinks osize below the true value length and the executor answers
+	 * BUFFER_TOO_SMALL for a value that actually fits (observed: 2MiB retrieves
+	 * failing with osize=1925120 while result_len=2097152). HG_Bulk_create is
+	 * natively multi-segment; the segments form one logically contiguous PUSH
+	 * space. Like the STORE value_bulk above, this MUST bypass the C7.2 handle
 	 * cache: through the bdev_kvrados forwarder the result_sink is a per-command
 	 * vfio-user DMA region (each rkv client op is a fresh connection), so a VA reused
 	 * across ops with different backing would hit a STALE registration and the
 	 * executor would RDMA-WRITE into unmapped/old pages — the client then reads zeros
 	 * (observed in-container). Register fresh and free at completion. (The cache
 	 * stays for the Exec path, whose tenant DPTR is stable across ops.) */
-	if (result_sink != NULL && result_sink_len > NKVX_INLINE_MAX) {
-		void *saddr = result_sink;
-		hg_size_t slen = result_sink_len;
+	if (sink_nsegs > 0) {
+		hg_size_t total = 0;
+		unsigned i;
 
-		front->bulk_misses++;	/* uncached: always a fresh registration */
-		ret = HG_Bulk_create(front->cls, 1, &saddr, &slen, HG_BULK_WRITE_ONLY,
-				     &call->result_sink);
-		if (ret != HG_SUCCESS) {
-			nkvx_bulk_release(front, call->value_bulk);
-			free(call);
-			return -EIO;
+		for (i = 0; i < sink_nsegs; i++) {
+			total += sink_segs[i].len;
 		}
-		local.result_sink = call->result_sink;
+		if (total > NKVX_INLINE_MAX) {
+			void *addrs[NKVX_FRONT_KV_SINK_MAX_SEGS];
+			hg_size_t lens[NKVX_FRONT_KV_SINK_MAX_SEGS];
+
+			if (sink_nsegs > NKVX_FRONT_KV_SINK_MAX_SEGS) {
+				/* Defensive: the bdev caps its gather well below this. */
+				nkvx_bulk_release(front, call->value_bulk);
+				free(call);
+				return -EINVAL;
+			}
+			for (i = 0; i < sink_nsegs; i++) {
+				addrs[i] = sink_segs[i].base;
+				lens[i] = sink_segs[i].len;
+			}
+			front->bulk_misses++;	/* uncached: always a fresh registration */
+			ret = HG_Bulk_create(front->cls, sink_nsegs, addrs, lens,
+					     HG_BULK_WRITE_ONLY, &call->result_sink);
+			if (ret != HG_SUCCESS) {
+				nkvx_bulk_release(front, call->value_bulk);
+				free(call);
+				return -EIO;
+			}
+			local.result_sink = call->result_sink;
+		}
 	}
 
 	ret = HG_Create(front->ctx, front->addr, front->kv_rpc_id, &handle);

@@ -59,7 +59,17 @@ nkvx_env_init_once(void)
 	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
 	opts.name = "rados-nkv";
-	opts.env_context = (void *)"--iova-mode=va";
+	/* NOTE: no explicit --iova-mode here. SPDK's env_dpdk auto-selects
+	 * va/pa based on the host IOMMU (and pushes its own --iova-mode when
+	 * no IOMMU is present); hardcoding va here collides with that on
+	 * IOMMU-less hosts ("--iova-mode should not occur multiple times").
+	 * Run no-huge (512 MiB cap) so the client works in containers without
+	 * /dev/hugepages — vfio-user DMA only needs the small bounce area.
+	 * mem_size must be set as an env opt (SPDK validates opts.mem_size
+	 * itself when no-huge; a bare -s in env_context is not enough). */
+	opts.no_huge = 1;
+	opts.mem_size = 512;
+	opts.env_context = NULL;
 	if (spdk_env_init(&opts) < 0) {
 		fprintf(stderr, "Unable to initialize SPDK env\n");
 		return -EIO;
@@ -164,6 +174,24 @@ nkvx_retrieve(nkvx_session *s, uint32_t nsid, const char *key,
 	}
 	rc = nvfu_kv_xfer_sgl(&s->dev, nsid, SPDK_NVME_OPC_KV_RETRIEVE, key, out_len, iova, 0, 0, &cpl);
 	if (rc != 0) {
+		/* Truncation contract: a value larger than out_len completes with
+		 * CAPACITY_EXCEEDED (0x81, command-specific) and the TRUE length in
+		 * DW0 — the buffer still holds the first out_len bytes. Surface it
+		 * as a partial success (*got = DW0 > out_len) so the caller can
+		 * re-read with a right-sized buffer (datapath.rs retrieve()'s
+		 * probe/re-read), instead of swallowing the contract as a flat
+		 * -EIO. sc rides the low byte of nvfu_submit_poll's return. */
+		if ((rc & 0xff) == SPDK_NVME_SC_CAPACITY_EXCEEDED && cpl.cdw0 > 0) {
+			n = spdk_min(cpl.cdw0, out_len);
+			if (n > 0) {
+				memcpy(out, buf, n);
+			}
+			if (got != NULL) {
+				*got = cpl.cdw0;
+			}
+			spdk_dma_free(buf);
+			return 0;
+		}
 		spdk_dma_free(buf);
 		return -EIO;
 	}
